@@ -79,6 +79,17 @@ export class GameRoom extends Room<GameState> {
   private livekitRoomName: string | null = null;
   private enemyTimer: ReturnType<typeof setInterval> | null = null;
   private readonly ENEMY_MOVE_DELAY = 2000; // 2 seconds
+  private aiTeammateTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly AI_TEAMMATE_MOVE_DELAY = 700;
+  private isTrainingMode: boolean = false;
+  private humanTrainingColor: PlayerColor = "BLUE";
+  private currentTrainingTurn: PlayerColor = "BLUE";
+
+  private trainingBotInterval: ReturnType<typeof setInterval> | null = null;
+  private trainingBotTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  private readonly TRAINING_BOT_MOVE_DELAY = 500;
+  private readonly TRAINING_BOT_TURN_DURATION = 3000;
   private levelSpec: LevelSpec | null = null;
   private lobbyTimeout: ReturnType<typeof setTimeout> | null = null;
   private readonly LOBBY_TIMEOUT = 10 * 60 * 1000; // 10 minutes in ms
@@ -243,6 +254,10 @@ export class GameRoom extends Room<GameState> {
 
       if (!player || !playerKey) return;
 
+      if (this.isTrainingMode && player.color !== this.currentTrainingTurn) {
+        return;
+      }
+
       const { direction } = message;
       let newX = player.x;
       let newY = player.y;
@@ -306,6 +321,17 @@ export class GameRoom extends Room<GameState> {
       if (message.seq !== undefined) {
         client.send("moveAck", { seq: message.seq, x: player.x, y: player.y });
       }
+    });
+
+    this.onMessage("endTrainingTurn", (client) => {
+      if (!this.isTrainingMode) return;
+
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+
+      if (player.color !== this.currentTrainingTurn) return;
+
+     this.advanceTrainingTurn();
     });
 
     // Handle ping - just broadcast to all clients, don't store in state
@@ -382,7 +408,7 @@ export class GameRoom extends Room<GameState> {
       if (!player || !this.state.gameStarted) return;
 
       // In solo mode, immediately clear the board
-      if (this.isSoloMode) {
+      if (this.isSoloMode || this.isTrainingMode) {
         this.executeClearBoard();
         return;
       }
@@ -428,7 +454,7 @@ export class GameRoom extends Room<GameState> {
       if (!player || !this.state.gameStarted || this.state.isGameOver) return;
 
       // In solo mode, immediately abandon
-      if (this.isSoloMode) {
+      if (this.isSoloMode || this.isTrainingMode) {
         this.executeAbandonGame();
         return;
       }
@@ -522,6 +548,9 @@ export class GameRoom extends Room<GameState> {
     const devMode = gameTokenSecret ? verifiedDevMode : (options.devMode || false);
     const soloMode = gameTokenSecret ? verifiedSoloMode : (options.soloMode || false);
 
+    const trainingMode = options.trainingMode === true;
+    const trainingColor = options.trainingColor as PlayerColor | undefined;
+
     // Capture the polarwinds_sessions.id UUID from the client. Passed in as
     // options.sessionId by the lobby (useGameLobby gets it from join-matchmaking's
     // response). Used as the S3 prefix for transcripts so they co-locate with
@@ -583,6 +612,17 @@ export class GameRoom extends Room<GameState> {
     if (this.state.players.size === 0 && soloMode) {
       this.isSoloMode = true;
       console.log("Room set to SOLO mode");
+    }
+    if (this.state.players.size === 0 && trainingMode) {
+      this.isTrainingMode = true;
+      this.isSoloMode = false;
+
+    if (trainingColor === "RED" || trainingColor === "GREEN" || trainingColor === "BLUE") {
+      this.humanTrainingColor = trainingColor;
+      this.currentTrainingTurn = trainingColor;
+      }
+
+      console.log(`Room set to TRAINING mode. Human color: ${this.humanTrainingColor}`);
     }
     if (this.state.players.size === 0 && devMode) {
       this.isDevMode = true;
@@ -714,7 +754,7 @@ export class GameRoom extends Room<GameState> {
     console.log(`Total players now: ${this.state.players.size}`);
 
     // In solo mode, create the remaining 2 players and start immediately
-    if (this.isSoloMode && this.state.players.size === 1 && !this.state.gameStarted) {
+    if ((this.isSoloMode || this.isTrainingMode) && this.state.players.size === 1 && !this.state.gameStarted) {
       const positions: Record<string, { x: number; y: number }> = {
         RED: { x: 10, y: 14 },
         GREEN: { x: 12, y: 14 },
@@ -824,6 +864,10 @@ export class GameRoom extends Room<GameState> {
       clearInterval(this.enemyTimer);
       this.enemyTimer = null;
     }
+    if (this.aiTeammateTimer) {
+      clearInterval(this.aiTeammateTimer);
+      this.aiTeammateTimer = null;
+    }
     if (this.lobbyTimeout) {
       clearTimeout(this.lobbyTimeout);
       this.lobbyTimeout = null;
@@ -835,6 +879,15 @@ export class GameRoom extends Room<GameState> {
     if (this.countdownTimer) {
       clearInterval(this.countdownTimer);
       this.countdownTimer = null;
+    }
+    if (this.trainingBotInterval) {
+      clearInterval(this.trainingBotInterval);
+      this.trainingBotInterval = null;
+    }
+
+    if (this.trainingBotTimeout) {
+      clearTimeout(this.trainingBotTimeout);
+      this.trainingBotTimeout = null;
     }
 
     // Safety net: if the session was never successfully ended in the DB
@@ -857,7 +910,11 @@ export class GameRoom extends Room<GameState> {
 
     this.state.gameStarted = true;
 
-    console.log(`Game mode: ${this.isSoloMode ? 'SOLO' : 'MULTIPLAYER'}`);
+    console.log(`Game mode: ${this.isTrainingMode ? "TRAINING" : this.isSoloMode ? "SOLO" : "MULTIPLAYER"}`);
+
+    if (this.isTrainingMode) {
+      this.startTrainingTurns();
+    }
 
     // Generate initial collectibles
     this.generateInitialCollectibles();
@@ -1765,6 +1822,139 @@ export class GameRoom extends Room<GameState> {
     for (const enemy of this.state.enemies) {
       if (enemy.x === x && enemy.y === y) return true;
     }
+    return false;
+  }
+
+  private startTrainingTurns() {
+    this.currentTrainingTurn = this.humanTrainingColor;
+    console.log(`Training Mode started. Human color: ${this.humanTrainingColor}`);
+    this.broadcast("trainingTurnChanged", {
+      currentTurn: this.currentTrainingTurn,
+      humanColor: this.humanTrainingColor,
+    });
+  }
+
+  private advanceTrainingTurn() {
+    if (this.trainingBotInterval) {
+      clearInterval(this.trainingBotInterval);
+      this.trainingBotInterval = null;
+    }
+
+    if (this.trainingBotTimeout) {
+      clearTimeout(this.trainingBotTimeout);
+      this.trainingBotTimeout = null;
+    }
+
+    if (this.currentTrainingTurn === "BLUE") {
+      this.currentTrainingTurn = "RED";
+    } else if (this.currentTrainingTurn === "RED") {
+      this.currentTrainingTurn = "GREEN";
+    } else {
+      this.currentTrainingTurn = "BLUE";
+    }
+
+    console.log(`Training turn changed to ${this.currentTrainingTurn}`);
+
+    this.broadcast("trainingTurnChanged", {
+      currentTurn: this.currentTrainingTurn,
+      humanColor: this.humanTrainingColor,
+    });
+
+    if (this.currentTrainingTurn !== this.humanTrainingColor) {
+      this.runTrainingBotTurn(this.currentTrainingTurn);
+    }
+  }
+
+  private runTrainingBotTurn(color: PlayerColor) {
+    console.log(`Training bot ${color} turn started`);
+
+    this.trainingBotInterval = setInterval(() => {
+      this.moveTrainingBot(color);
+    }, this.TRAINING_BOT_MOVE_DELAY);
+
+    this.trainingBotTimeout = setTimeout(() => {
+      console.log(`Training bot ${color} turn ended`);
+      this.advanceTrainingTurn();
+    }, this.TRAINING_BOT_TURN_DURATION);
+  }
+
+  private moveTrainingBot(color: PlayerColor) {
+    if (!this.isTrainingMode || this.state.countdown > 0 || this.state.isGameOver) return;
+
+    let bot: Player | null = null;
+
+    this.state.players.forEach((player) => {
+      if (player.color === color) {
+        bot = player;
+      }
+    });
+
+    if (!bot) return;
+
+    const move = this.chooseTrainingBotMove(bot);
+    if (!move) return;
+
+    bot.x = move.x;
+    bot.y = move.y;
+
+    const cellKey = `${move.x},${move.y}`;
+    let cell = this.state.gridColors.get(cellKey);
+
+    if (!cell) {
+      cell = new GridCell();
+      this.state.gridColors.set(cellKey, cell);
+    }
+
+    cell.color = bot.color;
+    this.calculateScores();
+  }
+
+  private chooseTrainingBotMove(player: Player): { x: number; y: number } | null {
+    const center = Math.floor(this.MAX_GRID_SIZE / 2);
+    const halfWidth = Math.floor(this.state.gridWidth / 2);
+    const halfHeight = Math.floor(this.state.gridHeight / 2);
+
+    const minX = center - halfWidth;
+    const maxX = center + halfWidth - 1;
+    const minY = center - halfHeight;
+    const maxY = center + halfHeight - 1;
+
+    const adjacent = [
+      { x: player.x, y: player.y - 1 },
+      { x: player.x, y: player.y + 1 },
+      { x: player.x - 1, y: player.y },
+      { x: player.x + 1, y: player.y },
+    ].filter(pos =>
+      pos.x >= minX &&
+      pos.x <= maxX &&
+      pos.y >= minY &&
+      pos.y <= maxY &&
+      !this.isTrainingMoveBlocked(pos.x, pos.y, player.color)
+    );
+
+    if (adjacent.length === 0) return null;
+
+    const unpainted = adjacent.filter(pos => {
+      return !this.state.gridColors.get(`${pos.x},${pos.y}`);
+    });
+
+    const options = unpainted.length > 0 ? unpainted : adjacent;
+    return options[Math.floor(this.enemyRng.next() * options.length)];
+  }
+
+  private isTrainingMoveBlocked(x: number, y: number, movingColor: PlayerColor): boolean {
+    for (const [, player] of this.state.players) {
+      if (player.color !== movingColor && player.x === x && player.y === y) {
+        return true;
+      }
+    }
+
+    for (const enemy of this.state.enemies) {
+      if (enemy.x === x && enemy.y === y) {
+        return true;
+      }
+    }
+
     return false;
   }
 

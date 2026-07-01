@@ -378,6 +378,7 @@ interface GameScreenProps {
   gridHeight: number;
   myColor: PlayerColor | null;
   isSoloMode: boolean;
+  isTrainingMode?: boolean;
   scores: Record<PlayerColor, number>;
   totalScore: number;
   highScore: number;
@@ -481,6 +482,7 @@ export const GameScreen = ({
   gridHeight,
   myColor,
   isSoloMode,
+  isTrainingMode = false,
   scores,
   totalScore,
   highScore,
@@ -961,7 +963,7 @@ export const GameScreen = ({
         if (now - lastRepeatTimeRef.current < REPEAT_INTERVAL) return;
         lastRepeatTimeRef.current = now;
       }
-      if (isSoloMode && e.key === "Tab") {
+      if (isSoloMode && !isTrainingMode && e.key === "Tab") {
         e.preventDefault();
         const playerArray = Array.from(players.values());
         if (playerArray.length > 0) {
@@ -1000,9 +1002,12 @@ export const GameScreen = ({
         e.preventDefault();
 
         const playerArray = Array.from(players.values());
-        const currentPlayer = isSoloMode
-          ? playerArray[activePlayerIndex]
-          : playerArray.find(p => p.color === myColor);
+        const currentPlayer = isTrainingMode
+          ? playerArray.find(p => p.color === myColor)
+          : isSoloMode
+            ? playerArray[activePlayerIndex]
+            : playerArray.find(p => p.color === myColor);
+
         const activeColor = currentPlayer?.color;
 
         // Immediately predict local movement
@@ -1427,7 +1432,7 @@ export const GameScreen = ({
                     Mode
                   </p>
                   <p className="truncate text-xs font-medium tabular-nums leading-tight text-slate-200">
-                    Solo mode
+                    {isTrainingMode ? "Training mode" : "Solo mode"}
                   </p>
                 </div>
                 <div className="grid min-w-0 gap-1">
@@ -1450,17 +1455,6 @@ export const GameScreen = ({
               </div>
 
               <div className="relative z-10 flex min-h-10 w-full shrink-0 flex-nowrap items-center justify-between gap-x-2 border-t border-white/10 px-3 py-2">
-                <div className="flex min-w-0 flex-1 items-center gap-x-1.5">
-                  <kbd
-                    className="inline-flex shrink-0 items-center rounded-none border border-solid bg-canvas/50 px-1.5 py-0.5 font-montreal text-[9px] font-medium uppercase tracking-[0.1em] text-slate-400"
-                    style={{ borderColor: POLAR_HUD.border }}
-                  >
-                    Tab
-                  </kbd>
-                  <span className="min-w-0 truncate text-[11px] leading-snug text-slate-500">
-                    Switch player
-                  </span>
-                </div>
                 <div className="flex shrink-0 items-center gap-0.5">
                   <button
                     type="button"
@@ -1547,6 +1541,15 @@ export const GameScreen = ({
 
         {/* Controls reference — toggled via info button */}
         {controlsOpen && <GameControls showPing={!isSoloMode} />}
+        {isTrainingMode && (
+          <button
+            type="button"
+            onClick={() => room?.send("endTrainingTurn")}
+            className="absolute left-4 top-40 z-30 rounded-none border border-orange-400/60 bg-orange-950/60 px-4 py-2 text-xs font-bold uppercase tracking-wider text-orange-200 hover:bg-orange-900/80"
+          >
+            End Turn
+          </button>
+        )}
       </div>
 
       {/* Stage Display - Top Center (polar blue chrome) */}

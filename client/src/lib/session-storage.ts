@@ -19,6 +19,8 @@ export interface GameInitPayload {
    * Colyseus server so transcripts and other per-session artifacts key off
    * the DB row UUID, not the transient Colyseus room id. */
   sessionId?: string;
+  trainingMode?: boolean;
+  trainingColor?: "BLUE" | "RED" | "GREEN";
 }
 
 const RETURN_URL_KEY = "pw_return_url";

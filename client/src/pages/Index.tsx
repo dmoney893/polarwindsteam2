@@ -451,6 +451,9 @@ const Index = () => {
             })
           : await client.create<ServerGameState>("game_room", {
               soloMode: initPayload.soloMode,
+              trainingMode: initPayload.trainingMode,
+              trainingColor: initPayload.trainingColor,
+
               userId: initPayload.userId,
               playerName: initPayload.playerName,
               devMode: initPayload.devMode,
@@ -596,7 +599,8 @@ const Index = () => {
         gridWidth={gameState.gridWidth}
         gridHeight={gameState.gridHeight}
         myColor={myColor}
-        isSoloMode={initPayload?.soloMode || false}
+        isSoloMode={initPayload?.soloMode || initPayload?.trainingMode || false}
+        isTrainingMode={initPayload?.trainingMode || false}
         scores={gameState.scores}
         totalScore={gameState.totalScore}
         highScore={gameState.highScore}

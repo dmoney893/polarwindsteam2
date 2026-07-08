@@ -28,13 +28,25 @@ class SeededRNG {
   }
 }
 
+type MoveDirection = "up" | "down" | "left" | "right";
+
+const MOVE_DIRECTIONS: MoveDirection[] = ["up", "down", "left", "right"];
+
+type SoloPingTarget = "primary" | "secondary";
+
 interface MoveMessage {
-  direction: "up" | "down" | "left" | "right";
+  direction: MoveDirection;
   seq?: number;
   targetColor?: "RED" | "GREEN" | "BLUE";
 }
 
 interface PingMessage {
+  x: number;
+  y: number;
+  target?: SoloPingTarget;
+}
+
+interface SoloBotTarget {
   x: number;
   y: number;
 }
@@ -60,6 +72,7 @@ export class GameRoom extends Room<GameState> {
   private readonly INITIAL_VISIBLE_HEIGHT = 8; // Starting visible height (stage 1)
   private rng: SeededRNG;       // clue/collectible placement only
   private enemyRng: SeededRNG;  // enemy spawning & movement only
+  private botRng: SeededRNG;    // solo teammate movement only
   private collectibleSpawnConfig: CollectibleSpawnConfig;
   private userIds: Map<string, string> = new Map(); // sessionId -> userId
   private userIdToColor: Map<string, "RED" | "GREEN" | "BLUE"> = new Map(); // userId -> color for reconnection
@@ -79,8 +92,11 @@ export class GameRoom extends Room<GameState> {
   private livekitRoomName: string | null = null;
   private enemyTimer: ReturnType<typeof setInterval> | null = null;
   private readonly ENEMY_MOVE_DELAY = 2000; // 2 seconds
-  private aiTeammateTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly AI_TEAMMATE_MOVE_DELAY = 700;
+  private soloBotTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly SOLO_BOT_MOVE_DELAY = 550;
+  private readonly GRID_SPACING = 2.5;
+  private readonly SOLO_BOT_TARGET_STEP_BONUS = 18;
+  private soloBotTargets = new Map<string, SoloBotTarget>();
   private isTrainingMode: boolean = false;
   private humanTrainingColor: PlayerColor = "BLUE";
   private currentTrainingTurn: PlayerColor = "BLUE";
@@ -209,6 +225,7 @@ export class GameRoom extends Room<GameState> {
     }
     this.rng = new SeededRNG(seed);
     this.enemyRng = new SeededRNG(seed ^ 0x45_4E_45_4D); // separate stream for enemy logic
+    this.botRng = new SeededRNG(seed ^ 0x42_4F_54); // separate stream for solo teammate logic
     console.log("RNG initialized with seed:", seed);
 
     this.stageThresholds = this.collectibleSpawnConfig.custom_target_scores || [];
@@ -332,13 +349,18 @@ export class GameRoom extends Room<GameState> {
 
       if (player.color !== this.currentTrainingTurn) return;
 
-     this.advanceTrainingTurn();
+      this.advanceTrainingTurn();
     });
 
-    // Handle ping - just broadcast to all clients, don't store in state
+    // Handle ping - broadcast in multiplayer, direct solo AI teammates in solo mode.
     this.onMessage("ping", (client, message: PingMessage) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
+
+      if (this.isSoloMode && message.target) {
+        this.handleSoloDirectedPing(client, player, message);
+        return;
+      }
 
       // Broadcast to all clients (excluding sender)
       this.broadcast("ping", {
@@ -863,9 +885,9 @@ export class GameRoom extends Room<GameState> {
       clearInterval(this.enemyTimer);
       this.enemyTimer = null;
     }
-    if (this.aiTeammateTimer) {
-      clearInterval(this.aiTeammateTimer);
-      this.aiTeammateTimer = null;
+    if (this.soloBotTimer) {
+      clearInterval(this.soloBotTimer);
+      this.soloBotTimer = null;
     }
     if (this.lobbyTimeout) {
       clearTimeout(this.lobbyTimeout);
@@ -954,6 +976,9 @@ export class GameRoom extends Room<GameState> {
         this.state.timeRemaining = this.GAME_DURATION;
         this.gameStartTime = Date.now();
         this.startGameTimer();
+        if (this.isSoloMode) {
+          this.startSoloBotTimer();
+        }
         console.log("Countdown complete — game timer started!");
       }
     }, 1000);
@@ -1064,6 +1089,11 @@ export class GameRoom extends Room<GameState> {
       this.enemyTimer = null;
     }
 
+    if (this.soloBotTimer) {
+      clearInterval(this.soloBotTimer);
+      this.soloBotTimer = null;
+    }
+
     // Wait for any in-flight milestone fetches (max 3s). Each fetch broadcasts its
     // own 'milestoneUnlocked' message the moment it resolves, so by the time this
     // await completes all per-milestone broadcasts have already been sent.
@@ -1099,6 +1129,297 @@ export class GameRoom extends Room<GameState> {
     // (removed) Standalone build has no persistence. This previously persisted the
     // session's high score to a platform endpoint. The high score still lives in
     // room state (this.state.highScore) for the duration of the session.
+  }
+
+  private getVisibleBounds() {
+    const center = Math.floor(this.MAX_GRID_SIZE / 2);
+    const halfWidth = Math.floor(this.state.gridWidth / 2);
+    const halfHeight = Math.floor(this.state.gridHeight / 2);
+
+    return {
+      minX: center - halfWidth,
+      maxX: center + halfWidth - 1,
+      minY: center - halfHeight,
+      maxY: center + halfHeight - 1,
+    };
+  }
+
+  private getGridPositionFromWorld(worldX: number, worldY: number): { x: number; y: number } | null {
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
+
+    const { minX, maxX, minY, maxY } = this.getVisibleBounds();
+    const offsetX = (this.state.gridWidth - 1) / 2;
+    const offsetY = (this.state.gridHeight - 1) / 2;
+    const x = Math.round(worldX / this.GRID_SPACING + offsetX) + minX;
+    const y = Math.round(worldY / this.GRID_SPACING + offsetY) + minY;
+
+    if (x < minX || x > maxX || y < minY || y > maxY) return null;
+    return { x, y };
+  }
+
+  private getWorldPositionFromGrid(x: number, y: number): { x: number; y: number } {
+    const { minX, minY } = this.getVisibleBounds();
+    const offsetX = (this.state.gridWidth - 1) / 2;
+    const offsetY = (this.state.gridHeight - 1) / 2;
+
+    return {
+      x: (x - minX - offsetX) * this.GRID_SPACING,
+      y: (y - minY - offsetY) * this.GRID_SPACING,
+    };
+  }
+
+  private getSoloBotPlayers(): Array<[string, Player]> {
+    return Array.from(this.state.players.entries())
+      .filter(([sessionId]) => sessionId.startsWith("solo-"))
+      .sort(([, a], [, b]) => this.playerColors.indexOf(a.color) - this.playerColors.indexOf(b.color));
+  }
+
+  private handleSoloDirectedPing(client: Client, player: Player, message: PingMessage) {
+    if (!this.state.gameStarted || this.state.isGameOver) return;
+    if (message.target !== "primary" && message.target !== "secondary") return;
+
+    const targetPosition = this.getGridPositionFromWorld(message.x, message.y);
+    if (!targetPosition) return;
+
+    const targetIndex = message.target === "secondary" ? 1 : 0;
+    const targetBot = this.getSoloBotPlayers()[targetIndex];
+    if (!targetBot) return;
+
+    const [botKey, botPlayer] = targetBot;
+    this.soloBotTargets.set(botKey, targetPosition);
+
+    const pingPosition = this.getWorldPositionFromGrid(targetPosition.x, targetPosition.y);
+    const pingPayload = {
+      x: pingPosition.x,
+      y: pingPosition.y,
+      color: botPlayer.color,
+    };
+
+    this.broadcast("ping", pingPayload, { except: client });
+    client.send("ping", pingPayload);
+
+    if (this.gameStartTime > 0) {
+      this.logEvent({
+        e: "solo_ping",
+        p: this.userIds.get(client.sessionId) || client.sessionId,
+        bot: botPlayer.color,
+        x: targetPosition.x,
+        y: targetPosition.y,
+        by: player.color,
+      });
+    }
+  }
+
+  private getNextPosition(player: Player, direction: MoveDirection): { x: number; y: number } {
+    const { minX, maxX, minY, maxY } = this.getVisibleBounds();
+    let x = player.x;
+    let y = player.y;
+
+    switch (direction) {
+      case "up":
+        y = Math.max(minY, player.y - 1);
+        break;
+      case "down":
+        y = Math.min(maxY, player.y + 1);
+        break;
+      case "left":
+        x = Math.max(minX, player.x - 1);
+        break;
+      case "right":
+        x = Math.min(maxX, player.x + 1);
+        break;
+    }
+
+    return { x, y };
+  }
+
+  private isPlayerMoveBlocked(playerKey: string, x: number, y: number): boolean {
+    let isBlocked = false;
+    this.state.players.forEach((otherPlayer, key) => {
+      if (key !== playerKey && otherPlayer.x === x && otherPlayer.y === y) {
+        isBlocked = true;
+      }
+    });
+    return isBlocked;
+  }
+
+  private movePlayer(
+    playerKey: string,
+    direction: MoveDirection,
+    replayActorId?: string,
+  ): { moved: boolean; x: number; y: number } | null {
+    const player = this.state.players.get(playerKey);
+    if (!player || this.state.countdown > 0 || this.state.isGameOver) return null;
+
+    const next = this.getNextPosition(player, direction);
+    if (this.isPlayerMoveBlocked(playerKey, next.x, next.y)) {
+      return { moved: false, x: player.x, y: player.y };
+    }
+
+    const moved = next.x !== player.x || next.y !== player.y;
+    player.x = next.x;
+    player.y = next.y;
+
+    const cellKey = `${next.x},${next.y}`;
+    let cell = this.state.gridColors.get(cellKey);
+    if (!cell) {
+      cell = new GridCell();
+      this.state.gridColors.set(cellKey, cell);
+    }
+    cell.color = player.color;
+
+    this.calculateScores();
+    this.logEvent({
+      e: "move",
+      p: replayActorId || this.userIds.get(playerKey) || playerKey,
+      d: direction,
+      x: next.x,
+      y: next.y,
+    });
+
+    return { moved, x: player.x, y: player.y };
+  }
+
+  private startSoloBotTimer() {
+    if (!this.isSoloMode || this.soloBotTimer) return;
+
+    console.log("Starting solo AI teammate timer");
+    this.soloBotTimer = setInterval(() => {
+      this.moveSoloBots();
+    }, this.SOLO_BOT_MOVE_DELAY);
+  }
+
+  private moveSoloBots() {
+    if (!this.isSoloMode || !this.state.gameStarted || this.state.countdown > 0 || this.state.isGameOver) {
+      return;
+    }
+
+    for (const [playerKey, player] of this.getSoloBotPlayers()) {
+      this.clearSoloBotTargetIfReached(playerKey, player.x, player.y);
+
+      const direction = this.chooseSoloBotMove(playerKey, player);
+      if (direction) {
+        const result = this.movePlayer(playerKey, direction, `AI-${player.color}`);
+        if (result) {
+          this.clearSoloBotTargetIfReached(playerKey, result.x, result.y);
+        }
+      }
+    }
+  }
+
+  private clearSoloBotTargetIfReached(playerKey: string, x: number, y: number) {
+    const target = this.soloBotTargets.get(playerKey);
+    if (target && target.x === x && target.y === y) {
+      this.soloBotTargets.delete(playerKey);
+    }
+  }
+
+  private chooseSoloBotMove(playerKey: string, player: Player): MoveDirection | null {
+    const candidates: Array<{ direction: MoveDirection; score: number }> = [];
+
+    for (const direction of MOVE_DIRECTIONS) {
+      const next = this.getNextPosition(player, direction);
+      if (next.x === player.x && next.y === player.y) continue;
+      if (this.isPlayerMoveBlocked(playerKey, next.x, next.y)) continue;
+      if (this.isEnemyAt(next.x, next.y)) continue;
+
+      candidates.push({
+        direction,
+        score: this.scoreSoloBotMove(playerKey, player, next.x, next.y),
+      });
+    }
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0].direction;
+  }
+
+  private scoreSoloBotMove(playerKey: string, player: Player, x: number, y: number): number {
+    const cell = this.state.gridColors.get(`${x},${y}`);
+    let score = this.botRng.next() * 0.5;
+
+    if (!cell?.color) {
+      score += 8;
+    } else if (cell.color === player.color) {
+      score += 2;
+    } else {
+      score -= 4;
+    }
+
+    score += this.countAdjacentBlankCells(x, y) * 0.75;
+    score -= this.getNearbyEnemyPenalty(x, y);
+
+    const directedTarget = this.soloBotTargets.get(playerKey);
+    if (directedTarget) {
+      const currentDistance = Math.abs(directedTarget.x - player.x) + Math.abs(directedTarget.y - player.y);
+      const nextDistance = Math.abs(directedTarget.x - x) + Math.abs(directedTarget.y - y);
+      const distanceDelta = currentDistance - nextDistance;
+
+      score += distanceDelta * this.SOLO_BOT_TARGET_STEP_BONUS;
+      score += Math.max(0, 10 - nextDistance) * 1.2;
+      if (nextDistance === 0) score += 30;
+    }
+
+    const currentTargetDistance = this.getNearestHelpfulCollectibleDistance(player.color, player.x, player.y);
+    const nextTargetDistance = this.getNearestHelpfulCollectibleDistance(player.color, x, y);
+    if (Number.isFinite(nextTargetDistance)) {
+      score += Math.max(0, 12 - nextTargetDistance) * 0.8;
+      if (Number.isFinite(currentTargetDistance)) {
+        score += (currentTargetDistance - nextTargetDistance) * 3;
+      }
+    }
+
+    return score;
+  }
+
+  private countAdjacentBlankCells(x: number, y: number): number {
+    const { minX, maxX, minY, maxY } = this.getVisibleBounds();
+    let count = 0;
+
+    for (const direction of MOVE_DIRECTIONS) {
+      let nx = x;
+      let ny = y;
+      if (direction === "up") ny--;
+      if (direction === "down") ny++;
+      if (direction === "left") nx--;
+      if (direction === "right") nx++;
+      if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue;
+      if (!this.state.gridColors.get(`${nx},${ny}`)?.color) count++;
+    }
+
+    return count;
+  }
+
+  private getNearestHelpfulCollectibleDistance(color: PlayerColor, x: number, y: number): number {
+    let nearest = Number.POSITIVE_INFINITY;
+
+    for (const collectible of this.state.collectibles) {
+      if (collectible.color !== color && collectible.color !== "NEUTRAL") continue;
+      const distance = Math.abs(collectible.x - x) + Math.abs(collectible.y - y);
+      if (distance < nearest) nearest = distance;
+    }
+
+    return nearest;
+  }
+
+  private isEnemyAt(x: number, y: number): boolean {
+    for (const enemy of this.state.enemies) {
+      if (enemy.x === x && enemy.y === y) return true;
+    }
+    return false;
+  }
+
+  private getNearbyEnemyPenalty(x: number, y: number): number {
+    let penalty = 0;
+
+    for (const enemy of this.state.enemies) {
+      const distance = Math.abs(enemy.x - x) + Math.abs(enemy.y - y);
+      if (distance === 1) penalty += 15;
+      if (distance === 2) penalty += 4;
+    }
+
+    return penalty;
   }
 
   private generateInitialCollectibles() {

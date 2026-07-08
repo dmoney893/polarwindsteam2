@@ -37,7 +37,15 @@ type MoveDirection = "up" | "down" | "left" | "right";
 
 const MOVE_DIRECTIONS: MoveDirection[] = ["up", "down", "left", "right"];
 
+type SoloPingTarget = "primary" | "secondary";
+
 interface PingMessage {
+  x: number;
+  y: number;
+  target?: SoloPingTarget;
+}
+
+interface SoloBotTarget {
   x: number;
   y: number;
 }
@@ -85,6 +93,9 @@ export class GameRoom extends Room<GameState> {
   private readonly ENEMY_MOVE_DELAY = 2000; // 2 seconds
   private soloBotTimer: ReturnType<typeof setInterval> | null = null;
   private readonly SOLO_BOT_MOVE_DELAY = 550;
+  private readonly GRID_SPACING = 2.5;
+  private readonly SOLO_BOT_TARGET_STEP_BONUS = 18;
+  private soloBotTargets = new Map<string, SoloBotTarget>();
   private levelSpec: LevelSpec | null = null;
   private lobbyTimeout: ReturnType<typeof setTimeout> | null = null;
   private readonly LOBBY_TIMEOUT = 10 * 60 * 1000; // 10 minutes in ms
@@ -240,10 +251,15 @@ export class GameRoom extends Room<GameState> {
       }
     });
 
-    // Handle ping - just broadcast to all clients, don't store in state
+    // Handle ping - broadcast in multiplayer, direct solo AI teammates in solo mode.
     this.onMessage("ping", (client, message: PingMessage) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
+
+      if (this.isSoloMode && message.target) {
+        this.handleSoloDirectedPing(client, player, message);
+        return;
+      }
 
       // Broadcast to all clients (excluding sender)
       this.broadcast("ping", {
@@ -1001,6 +1017,72 @@ export class GameRoom extends Room<GameState> {
     };
   }
 
+  private getGridPositionFromWorld(worldX: number, worldY: number): { x: number; y: number } | null {
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
+
+    const { minX, maxX, minY, maxY } = this.getVisibleBounds();
+    const offsetX = (this.state.gridWidth - 1) / 2;
+    const offsetY = (this.state.gridHeight - 1) / 2;
+    const x = Math.round(worldX / this.GRID_SPACING + offsetX) + minX;
+    const y = Math.round(worldY / this.GRID_SPACING + offsetY) + minY;
+
+    if (x < minX || x > maxX || y < minY || y > maxY) return null;
+    return { x, y };
+  }
+
+  private getWorldPositionFromGrid(x: number, y: number): { x: number; y: number } {
+    const { minX, minY } = this.getVisibleBounds();
+    const offsetX = (this.state.gridWidth - 1) / 2;
+    const offsetY = (this.state.gridHeight - 1) / 2;
+
+    return {
+      x: (x - minX - offsetX) * this.GRID_SPACING,
+      y: (y - minY - offsetY) * this.GRID_SPACING,
+    };
+  }
+
+  private getSoloBotPlayers(): Array<[string, Player]> {
+    return Array.from(this.state.players.entries())
+      .filter(([sessionId]) => sessionId.startsWith("solo-"))
+      .sort(([, a], [, b]) => this.playerColors.indexOf(a.color) - this.playerColors.indexOf(b.color));
+  }
+
+  private handleSoloDirectedPing(client: Client, player: Player, message: PingMessage) {
+    if (!this.state.gameStarted || this.state.isGameOver) return;
+    if (message.target !== "primary" && message.target !== "secondary") return;
+
+    const targetPosition = this.getGridPositionFromWorld(message.x, message.y);
+    if (!targetPosition) return;
+
+    const targetIndex = message.target === "secondary" ? 1 : 0;
+    const targetBot = this.getSoloBotPlayers()[targetIndex];
+    if (!targetBot) return;
+
+    const [botKey, botPlayer] = targetBot;
+    this.soloBotTargets.set(botKey, targetPosition);
+
+    const pingPosition = this.getWorldPositionFromGrid(targetPosition.x, targetPosition.y);
+    const pingPayload = {
+      x: pingPosition.x,
+      y: pingPosition.y,
+      color: botPlayer.color,
+    };
+
+    this.broadcast("ping", pingPayload, { except: client });
+    client.send("ping", pingPayload);
+
+    if (this.gameStartTime > 0) {
+      this.logEvent({
+        e: "solo_ping",
+        p: this.userIds.get(client.sessionId) || client.sessionId,
+        bot: botPlayer.color,
+        x: targetPosition.x,
+        y: targetPosition.y,
+        by: player.color,
+      });
+    }
+  }
+
   private getNextPosition(player: Player, direction: MoveDirection): { x: number; y: number } {
     const { minX, maxX, minY, maxY } = this.getVisibleBounds();
     let x = player.x;
@@ -1085,15 +1167,23 @@ export class GameRoom extends Room<GameState> {
       return;
     }
 
-    const botPlayers = Array.from(this.state.players.entries()).filter(
-      ([sessionId]) => sessionId.startsWith("solo-"),
-    );
+    for (const [playerKey, player] of this.getSoloBotPlayers()) {
+      this.clearSoloBotTargetIfReached(playerKey, player.x, player.y);
 
-    for (const [playerKey, player] of botPlayers) {
       const direction = this.chooseSoloBotMove(playerKey, player);
       if (direction) {
-        this.movePlayer(playerKey, direction, `AI-${player.color}`);
+        const result = this.movePlayer(playerKey, direction, `AI-${player.color}`);
+        if (result) {
+          this.clearSoloBotTargetIfReached(playerKey, result.x, result.y);
+        }
       }
+    }
+  }
+
+  private clearSoloBotTargetIfReached(playerKey: string, x: number, y: number) {
+    const target = this.soloBotTargets.get(playerKey);
+    if (target && target.x === x && target.y === y) {
+      this.soloBotTargets.delete(playerKey);
     }
   }
 
@@ -1108,7 +1198,7 @@ export class GameRoom extends Room<GameState> {
 
       candidates.push({
         direction,
-        score: this.scoreSoloBotMove(player, next.x, next.y),
+        score: this.scoreSoloBotMove(playerKey, player, next.x, next.y),
       });
     }
 
@@ -1118,7 +1208,7 @@ export class GameRoom extends Room<GameState> {
     return candidates[0].direction;
   }
 
-  private scoreSoloBotMove(player: Player, x: number, y: number): number {
+  private scoreSoloBotMove(playerKey: string, player: Player, x: number, y: number): number {
     const cell = this.state.gridColors.get(`${x},${y}`);
     let score = this.botRng.next() * 0.5;
 
@@ -1132,6 +1222,17 @@ export class GameRoom extends Room<GameState> {
 
     score += this.countAdjacentBlankCells(x, y) * 0.75;
     score -= this.getNearbyEnemyPenalty(x, y);
+
+    const directedTarget = this.soloBotTargets.get(playerKey);
+    if (directedTarget) {
+      const currentDistance = Math.abs(directedTarget.x - player.x) + Math.abs(directedTarget.y - player.y);
+      const nextDistance = Math.abs(directedTarget.x - x) + Math.abs(directedTarget.y - y);
+      const distanceDelta = currentDistance - nextDistance;
+
+      score += distanceDelta * this.SOLO_BOT_TARGET_STEP_BONUS;
+      score += Math.max(0, 10 - nextDistance) * 1.2;
+      if (nextDistance === 0) score += 30;
+    }
 
     const currentTargetDistance = this.getNearestHelpfulCollectibleDistance(player.color, player.x, player.y);
     const nextTargetDistance = this.getNearestHelpfulCollectibleDistance(player.color, x, y);

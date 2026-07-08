@@ -1488,7 +1488,7 @@ export const GameScreen = ({
         </div>
 
         {/* Controls reference — toggled via info button */}
-        {controlsOpen && <GameControls showPing={!isSoloMode} />}
+        {controlsOpen && <GameControls showPing pingMode={isSoloMode ? "solo" : "multiplayer"} />}
       </div>
 
       {/* Stage Display - Top Center (polar blue chrome) */}
@@ -2239,10 +2239,20 @@ export const GameScreen = ({
                 gridWidth={gridWidth}
                 gridHeight={gridHeight}
                 isDevMode={isDevMode}
-                onPing={(x, y) => {
-                  if (room) {
-                    room.send("ping", { x, y });
+                allowRightClickPing={isSoloMode}
+                onPing={(x, y, button) => {
+                  if (!room) return;
+
+                  if (isSoloMode) {
+                    room.send("ping", {
+                      x,
+                      y,
+                      target: button === 2 ? "secondary" : "primary",
+                    });
+                    return;
                   }
+
+                  room.send("ping", { x, y });
                 }}
                 onDevNodeClick={(gridX, gridY) => {
                   const currentPlayer = controlledPlayer;

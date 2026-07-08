@@ -4,7 +4,8 @@ import * as THREE from "three";
 
 interface ClickHandlerProps {
   spacing: number;
-  onPing: (x: number, y: number) => void;
+  onPing: (x: number, y: number, button: 0 | 2) => void;
+  allowRightClickPing?: boolean;
   isDevMode?: boolean;
   gridWidth: number;
   gridHeight: number;
@@ -15,7 +16,7 @@ interface ClickHandlerProps {
 const MAX_GRID = 26;
 const CLICK_RADIUS = 0.8;
 
-export const ClickHandler = ({ spacing, onPing, isDevMode, gridWidth, gridHeight, onDevNodeClick, onDevNodeRightClick }: ClickHandlerProps) => {
+export const ClickHandler = ({ spacing, onPing, allowRightClickPing = false, isDevMode, gridWidth, gridHeight, onDevNodeClick, onDevNodeRightClick }: ClickHandlerProps) => {
   const { camera, gl } = useThree();
 
   // Refs for drag state so event handlers always see current values
@@ -65,6 +66,21 @@ export const ClickHandler = ({ spacing, onPing, isDevMode, gridWidth, gridHeight
       return null;
     };
 
+    const getWorldPointFromEvent = (event: MouseEvent): THREE.Vector3 | null => {
+      const rect = gl.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 2.5);
+      const intersection = new THREE.Vector3();
+
+      return raycaster.ray.intersectPlane(plane, intersection) ? intersection : null;
+    };
+
     const applyToNode = (gridX: number, gridY: number, button: number) => {
       if (button === 0 && onDevNodeClick) {
         onDevNodeClick(gridX, gridY);
@@ -86,19 +102,14 @@ export const ClickHandler = ({ spacing, onPing, isDevMode, gridWidth, gridHeight
           visitedNodes.current.add(key);
           applyToNode(coords.gridX, coords.gridY, event.button);
         }
-      } else if (event.button === 0) {
-        // Non-dev mode: ping on left click
-        const rect = gl.domElement.getBoundingClientRect();
-        const mouse = new THREE.Vector2(
-          ((event.clientX - rect.left) / rect.width) * 2 - 1,
-          -((event.clientY - rect.top) / rect.height) * 2 + 1
-        );
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(mouse, camera);
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 2.5);
-        const intersection = new THREE.Vector3();
-        if (raycaster.ray.intersectPlane(plane, intersection)) {
-          onPing(intersection.x, intersection.z);
+      } else if (event.button === 0 || (allowRightClickPing && event.button === 2)) {
+        if (event.button === 2) {
+          event.preventDefault();
+        }
+
+        const intersection = getWorldPointFromEvent(event);
+        if (intersection) {
+          onPing(intersection.x, intersection.z, event.button);
         }
       }
     };
@@ -123,7 +134,7 @@ export const ClickHandler = ({ spacing, onPing, isDevMode, gridWidth, gridHeight
     };
 
     const handleContextMenu = (event: MouseEvent) => {
-      if (isDevMode) {
+      if (isDevMode || allowRightClickPing) {
         event.preventDefault();
       }
     };
@@ -142,7 +153,7 @@ export const ClickHandler = ({ spacing, onPing, isDevMode, gridWidth, gridHeight
       canvas.removeEventListener("mouseleave", stopDrag);
       canvas.removeEventListener("contextmenu", handleContextMenu);
     };
-  }, [camera, gl, onPing, isDevMode, gridWidth, gridHeight, onDevNodeClick, onDevNodeRightClick, spacing]);
+  }, [camera, gl, onPing, allowRightClickPing, isDevMode, gridWidth, gridHeight, onDevNodeClick, onDevNodeRightClick, spacing]);
 
   return null;
 };

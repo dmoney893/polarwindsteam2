@@ -45,6 +45,10 @@ interface DevPaintNodeMessage {
   color: string;
 }
 
+interface ChangeTrainingColorMessage {
+  color?: PlayerColor;
+}
+
 interface ClearBoardVote {
   sessionId: string;
   timestamp: number;
@@ -332,6 +336,13 @@ export class GameRoom extends Room<GameState> {
       if (player.color !== this.currentTrainingTurn) return;
 
      this.advanceTrainingTurn();
+    });
+
+    this.onMessage("changeTrainingColor", (client, message: ChangeTrainingColorMessage) => {
+      if (!this.isTrainingMode || !this.state.gameStarted || this.state.isGameOver) return;
+      if (!this.isPlayerColor(message.color)) return;
+
+      this.changeHumanTrainingColor(client, message.color);
     });
 
     // Handle ping - just broadcast to all clients, don't store in state
@@ -653,6 +664,7 @@ export class GameRoom extends Room<GameState> {
         existingPlayer.name = playerName || existingPlayer.name;
         existingPlayer.school = playerSchool || existingPlayer.school;
         existingPlayer.discordName = playerDiscordName || existingPlayer.discordName;
+        existingPlayer.isAI = false;
         this.state.players.set(client.sessionId, existingPlayer);
         console.log(`Restored player ${existingColor} at position (${existingPlayer.x}, ${existingPlayer.y})`);
       } else {
@@ -664,6 +676,7 @@ export class GameRoom extends Room<GameState> {
         player.name = playerName;
         player.school = playerSchool;
         player.discordName = playerDiscordName;
+        player.isAI = false;
         // Use default position for color
         switch (existingColor) {
           case "RED": player.x = 10; player.y = 14; break;
@@ -700,9 +713,10 @@ export class GameRoom extends Room<GameState> {
     }
 
     // New player - assign a color
-    const availableColor = this.playerColors.find(
-      (color) => !this.assignedColors.has(color)
-    );
+    const availableColor =
+      this.isTrainingMode && this.state.players.size === 0 && !this.assignedColors.has(this.humanTrainingColor)
+        ? this.humanTrainingColor
+        : this.playerColors.find((color) => !this.assignedColors.has(color));
 
     if (!availableColor) {
       console.log("No available color for player, rejecting join");
@@ -724,6 +738,7 @@ export class GameRoom extends Room<GameState> {
     player.name = playerName;
     player.school = playerSchool;
     player.discordName = playerDiscordName;
+    player.isAI = false;
 
     // Set initial position based on color
     switch (availableColor) {
@@ -769,6 +784,7 @@ export class GameRoom extends Room<GameState> {
         soloPlayer.color = color;
         soloPlayer.sessionId = `solo-${color.toLowerCase()}`;
         soloPlayer.name = color;
+        soloPlayer.isAI = this.isTrainingMode;
         soloPlayer.x = positions[color].x;
         soloPlayer.y = positions[color].y;
 
@@ -1825,16 +1841,15 @@ export class GameRoom extends Room<GameState> {
     return false;
   }
 
-  private startTrainingTurns() {
-    this.currentTrainingTurn = this.humanTrainingColor;
-    console.log(`Training Mode started. Human color: ${this.humanTrainingColor}`);
-    this.broadcast("trainingTurnChanged", {
-      currentTurn: this.currentTrainingTurn,
-      humanColor: this.humanTrainingColor,
-    });
+  private isPlayerColor(color: unknown): color is PlayerColor {
+    return color === "RED" || color === "GREEN" || color === "BLUE";
   }
 
-  private advanceTrainingTurn() {
+  private getTrainingBotSessionId(color: PlayerColor): string {
+    return `solo-${color.toLowerCase()}`;
+  }
+
+  private clearTrainingBotTimers() {
     if (this.trainingBotInterval) {
       clearInterval(this.trainingBotInterval);
       this.trainingBotInterval = null;
@@ -1844,6 +1859,77 @@ export class GameRoom extends Room<GameState> {
       clearTimeout(this.trainingBotTimeout);
       this.trainingBotTimeout = null;
     }
+  }
+
+  private broadcastTrainingTurnChanged() {
+    this.broadcast("trainingTurnChanged", {
+      currentTurn: this.currentTrainingTurn,
+      humanColor: this.humanTrainingColor,
+    });
+  }
+
+  private changeHumanTrainingColor(client: Client, targetColor: PlayerColor) {
+    const currentHuman = this.state.players.get(client.sessionId);
+    if (!currentHuman || currentHuman.isAI || currentHuman.color === targetColor) return;
+
+    const previousColor = currentHuman.color;
+    let targetPlayer: Player | null = null;
+    let targetKey: string | null = null;
+
+    this.state.players.forEach((player, key) => {
+      if (player.color === targetColor) {
+        targetPlayer = player;
+        targetKey = key;
+      }
+    });
+
+    if (!targetPlayer || !targetKey) return;
+
+    const humanProfile = {
+      name: currentHuman.name,
+      school: currentHuman.school,
+      discordName: currentHuman.discordName,
+    };
+
+    this.clearTrainingBotTimers();
+    this.state.players.delete(client.sessionId);
+    this.state.players.delete(targetKey);
+
+    currentHuman.sessionId = this.getTrainingBotSessionId(previousColor);
+    currentHuman.name = previousColor;
+    currentHuman.school = "";
+    currentHuman.discordName = "";
+    currentHuman.isAI = true;
+
+    targetPlayer.sessionId = client.sessionId;
+    targetPlayer.name = humanProfile.name;
+    targetPlayer.school = humanProfile.school;
+    targetPlayer.discordName = humanProfile.discordName;
+    targetPlayer.isAI = false;
+
+    this.state.players.set(currentHuman.sessionId, currentHuman);
+    this.state.players.set(client.sessionId, targetPlayer);
+
+    const userId = this.userIds.get(client.sessionId);
+    if (userId) {
+      this.userIdToColor.set(userId, targetColor);
+    }
+
+    this.humanTrainingColor = targetColor;
+    this.currentTrainingTurn = targetColor;
+
+    console.log(`Training human color changed from ${previousColor} to ${targetColor}`);
+    this.broadcastTrainingTurnChanged();
+  }
+
+  private startTrainingTurns() {
+    this.currentTrainingTurn = this.humanTrainingColor;
+    console.log(`Training Mode started. Human color: ${this.humanTrainingColor}`);
+    this.broadcastTrainingTurnChanged();
+  }
+
+  private advanceTrainingTurn() {
+    this.clearTrainingBotTimers();
 
     if (this.currentTrainingTurn === "BLUE") {
       this.currentTrainingTurn = "RED";
@@ -1855,10 +1941,7 @@ export class GameRoom extends Room<GameState> {
 
     console.log(`Training turn changed to ${this.currentTrainingTurn}`);
 
-    this.broadcast("trainingTurnChanged", {
-      currentTurn: this.currentTrainingTurn,
-      humanColor: this.humanTrainingColor,
-    });
+    this.broadcastTrainingTurnChanged();
 
     if (this.currentTrainingTurn !== this.humanTrainingColor) {
       this.runTrainingBotTurn(this.currentTrainingTurn);
@@ -1880,6 +1963,7 @@ export class GameRoom extends Room<GameState> {
 
   private moveTrainingBot(color: PlayerColor) {
     if (!this.isTrainingMode || this.state.countdown > 0 || this.state.isGameOver) return;
+    if (color === this.humanTrainingColor) return;
 
     let bot: Player | null = null;
 
@@ -1889,7 +1973,7 @@ export class GameRoom extends Room<GameState> {
       }
     });
 
-    if (!bot) return;
+    if (!bot || !bot.isAI) return;
 
     const move = this.chooseTrainingBotMove(bot);
     if (!move) return;

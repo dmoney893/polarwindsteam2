@@ -602,13 +602,21 @@ export const GameScreen = ({
     100,
   );
 
-  const scoreBarGradient = useMemo(() => {
+  const controlledPlayer = useMemo(() => {
     const playerArray = Array.from(players.values());
-    const c: PlayerColor = isSoloMode
-      ? playerArray[activePlayerIndex]?.color ?? "RED"
-      : myColor ?? "RED";
+    if (isTrainingMode && myColor) {
+      return playerArray.find((p) => p.color === myColor) ?? null;
+    }
+    if (isSoloMode) {
+      return playerArray[activePlayerIndex] ?? null;
+    }
+    return myColor ? playerArray.find((p) => p.color === myColor) ?? null : null;
+  }, [players, isTrainingMode, isSoloMode, myColor, activePlayerIndex]);
+
+  const scoreBarGradient = useMemo(() => {
+    const c: PlayerColor = controlledPlayer?.color ?? myColor ?? "RED";
     return SCORE_BAR_GRADIENT[c];
-  }, [isSoloMode, myColor, activePlayerIndex, players]);
+  }, [controlledPlayer, myColor]);
 
   const localPlayerDisplayName = useMemo(() => {
     if (!room) return null;
@@ -921,21 +929,11 @@ export const GameScreen = ({
   // Initialize predicted position when we know our player
   useEffect(() => {
     if (players.size > 0 && !predictedPos) {
-      if (isSoloMode) {
-        // In solo mode, use the active player's position
-        const playerArray = Array.from(players.values());
-        if (playerArray[activePlayerIndex]) {
-          setPredictedPos({ x: playerArray[activePlayerIndex].x, y: playerArray[activePlayerIndex].y });
-        }
-      } else if (myColor) {
-        // In multiplayer, use our player's position
-        const localPlayer = Array.from(players.values()).find(p => p.color === myColor);
-        if (localPlayer) {
-          setPredictedPos({ x: localPlayer.x, y: localPlayer.y });
-        }
+      if (controlledPlayer) {
+        setPredictedPos({ x: controlledPlayer.x, y: controlledPlayer.y });
       }
     }
-  }, [myColor, players, isSoloMode, predictedPos, activePlayerIndex]);
+  }, [controlledPlayer, predictedPos, players.size]);
 
   // Reset prediction when switching players in solo mode (only on activePlayerIndex change)
   const prevActivePlayerIndexRef = useRef(activePlayerIndex);
@@ -1002,12 +1000,7 @@ export const GameScreen = ({
         e.preventDefault();
 
         const playerArray = Array.from(players.values());
-        const currentPlayer = isTrainingMode
-          ? playerArray.find(p => p.color === myColor)
-          : isSoloMode
-            ? playerArray[activePlayerIndex]
-            : playerArray.find(p => p.color === myColor);
-
+        const currentPlayer = controlledPlayer;
         const activeColor = currentPlayer?.color;
 
         // Immediately predict local movement
@@ -1066,7 +1059,7 @@ export const GameScreen = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [room, myColor, isSoloMode, activePlayerIndex, players, gridWidth, gridHeight, predictedPos, isDevMode, isSpectator, countdown, isGameOver]);
+  }, [room, controlledPlayer, isSoloMode, activePlayerIndex, players, gridWidth, gridHeight, predictedPos, isDevMode, isSpectator, countdown, isGameOver]);
 
   // Transform Grid Colors to Node States
   const nodeStates = useMemo(() => {
@@ -1540,7 +1533,12 @@ export const GameScreen = ({
         </div>
 
         {/* Controls reference — toggled via info button */}
-        {controlsOpen && <GameControls showPing={!isSoloMode} />}
+        {controlsOpen && (
+          <GameControls
+            showPing={isTrainingMode || !isSoloMode}
+            pingMode={isTrainingMode ? "training" : "multiplayer"}
+          />
+        )}
         {isTrainingMode && (
           <button
             type="button"
@@ -2252,7 +2250,7 @@ export const GameScreen = ({
 
             {/* Players */}
             {Array.from(players.values()).map((player, index) => {
-              const isMe = isSoloMode ? index === activePlayerIndex : player.color === myColor;
+              const isMe = controlledPlayer ? player.sessionId === controlledPlayer.sessionId : false;
               // Use predicted position for local player in multiplayer
               const playerX = isMe && predictedPos ? predictedPos.x : player.x;
               const playerY = isMe && predictedPos ? predictedPos.y : player.y;
@@ -2300,10 +2298,22 @@ export const GameScreen = ({
                 gridWidth={gridWidth}
                 gridHeight={gridHeight}
                 isDevMode={isDevMode}
-                onPing={(x, y) => {
-                  if (room) {
-                    room.send("ping", { x, y });
+                allowRightClickPing={isTrainingMode}
+                onPing={(x, y, button) => {
+                  if (!room) return;
+
+                  if (isTrainingMode) {
+                    room.send("ping", {
+                      x,
+                      y,
+                      target: button === 2 ? "secondary" : "primary",
+                    });
+                    return;
                   }
+
+                  if (isSoloMode) return;
+
+                  room.send("ping", { x, y });
                 }}
                 onDevNodeClick={(gridX, gridY) => {
                   // Determine the active player's color (same logic as movement)

@@ -10,7 +10,12 @@ const BLUE = "#5ba8c8";          /* main: strokes, text, arrows */
 const BLUE_BORDER = "#2d6a82";   /* key borders */
 const BLUE_DIM = "#3d7a94";      /* secondary text ("or", subtitle) */
 
-export function GameControls({ showPing = true }: { showPing?: boolean }) {
+type PingMode = "multiplayer" | "training";
+
+export function GameControls({ showPing = true, pingMode = "multiplayer" }: { showPing?: boolean; pingMode?: PingMode }) {
+  const pingTitle = pingMode === "training" ? "Direct AI teammates." : "Ping a location.";
+  const pingSubtitle = pingMode === "training" ? "Left: first AI. Right: second." : "(Visible to your team)";
+
   return (
     <div
       className="relative rounded-none border border-solid bg-canvas/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] ring-1 ring-inset ring-white/[0.06] backdrop-blur-[4px]"
@@ -110,10 +115,10 @@ export function GameControls({ showPing = true }: { showPing?: boolean }) {
 
             <div className="flex flex-col gap-0.5">
               <p className="font-montreal text-[11px] font-semibold leading-snug" style={{ color: BLUE }}>
-                Ping a location.
+                {pingTitle}
               </p>
               <p className="font-montreal text-[10px] font-medium leading-snug" style={{ color: BLUE_DIM }}>
-                (Visible to your team)
+                {pingSubtitle}
               </p>
             </div>
           </div>

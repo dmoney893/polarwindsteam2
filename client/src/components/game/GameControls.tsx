@@ -10,11 +10,11 @@ const BLUE = "#5ba8c8";          /* main: strokes, text, arrows */
 const BLUE_BORDER = "#2d6a82";   /* key borders */
 const BLUE_DIM = "#3d7a94";      /* secondary text ("or", subtitle) */
 
-type PingMode = "multiplayer" | "solo";
+type PingMode = "multiplayer" | "training";
 
 export function GameControls({ showPing = true, pingMode = "multiplayer" }: { showPing?: boolean; pingMode?: PingMode }) {
-  const pingTitle = pingMode === "solo" ? "Direct AI teammates." : "Ping a location.";
-  const pingSubtitle = pingMode === "solo" ? "Left: first AI. Right: second." : "(Visible to your team)";
+  const pingTitle = pingMode === "training" ? "Direct AI teammates." : "Ping a location.";
+  const pingSubtitle = pingMode === "training" ? "Left: first AI. Right: second." : "(Visible to your team)";
 
   return (
     <div

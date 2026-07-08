@@ -1533,7 +1533,12 @@ export const GameScreen = ({
         </div>
 
         {/* Controls reference — toggled via info button */}
-        {controlsOpen && <GameControls showPing pingMode={isSoloMode ? "solo" : "multiplayer"} />}
+        {controlsOpen && (
+          <GameControls
+            showPing={isTrainingMode || !isSoloMode}
+            pingMode={isTrainingMode ? "training" : "multiplayer"}
+          />
+        )}
         {isTrainingMode && (
           <button
             type="button"
@@ -2293,11 +2298,11 @@ export const GameScreen = ({
                 gridWidth={gridWidth}
                 gridHeight={gridHeight}
                 isDevMode={isDevMode}
-                allowRightClickPing={isSoloMode}
+                allowRightClickPing={isTrainingMode}
                 onPing={(x, y, button) => {
                   if (!room) return;
 
-                  if (isSoloMode) {
+                  if (isTrainingMode) {
                     room.send("ping", {
                       x,
                       y,
@@ -2305,6 +2310,8 @@ export const GameScreen = ({
                     });
                     return;
                   }
+
+                  if (isSoloMode) return;
 
                   room.send("ping", { x, y });
                 }}

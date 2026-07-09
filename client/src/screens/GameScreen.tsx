@@ -927,21 +927,11 @@ export const GameScreen = ({
   // Initialize predicted position when we know our player
   useEffect(() => {
     if (players.size > 0 && !predictedPos) {
-      if (isSoloMode) {
-        // In solo mode, use the active player's position
-        const playerArray = Array.from(players.values());
-        if (playerArray[activePlayerIndex]) {
-          setPredictedPos({ x: playerArray[activePlayerIndex].x, y: playerArray[activePlayerIndex].y });
-        }
-      } else if (myColor) {
-        // In multiplayer, use our player's position
-        const localPlayer = Array.from(players.values()).find(p => p.color === myColor);
-        if (localPlayer) {
-          setPredictedPos({ x: localPlayer.x, y: localPlayer.y });
-        }
+      if (controlledPlayer) {
+        setPredictedPos({ x: controlledPlayer.x, y: controlledPlayer.y });
       }
     }
-  }, [myColor, players, isSoloMode, predictedPos, activePlayerIndex]);
+  }, [controlledPlayer, predictedPos, players.size]);
 
   // Reset prediction when switching players in solo mode (only on activePlayerIndex change)
   const prevActivePlayerIndexRef = useRef(activePlayerIndex);
@@ -1039,12 +1029,7 @@ export const GameScreen = ({
         e.preventDefault();
 
         const playerArray = Array.from(players.values());
-        const currentPlayer = isTrainingMode
-          ? playerArray.find(p => p.color === myColor)
-          : isSoloMode
-            ? playerArray[activePlayerIndex]
-            : playerArray.find(p => p.color === myColor);
-
+        const currentPlayer = controlledPlayer;
         const activeColor = currentPlayer?.color;
 
         // Immediately predict local movement
@@ -2389,10 +2374,22 @@ export const GameScreen = ({
                 gridWidth={gridWidth}
                 gridHeight={gridHeight}
                 isDevMode={isDevMode}
-                onPing={(x, y) => {
-                  if (room) {
-                    room.send("ping", { x, y });
+                allowRightClickPing={isTrainingMode}
+                onPing={(x, y, button) => {
+                  if (!room) return;
+
+                  if (isTrainingMode) {
+                    room.send("ping", {
+                      x,
+                      y,
+                      target: button === 2 ? "secondary" : "primary",
+                    });
+                    return;
                   }
+
+                  if (isSoloMode) return;
+
+                  room.send("ping", { x, y });
                 }}
                 onDevNodeClick={(gridX, gridY) => {
                   // Determine the active player's color (same logic as movement)

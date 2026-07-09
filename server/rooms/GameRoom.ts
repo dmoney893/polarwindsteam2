@@ -28,13 +28,23 @@ class SeededRNG {
   }
 }
 
+type MoveDirection = "up" | "down" | "left" | "right";
+
+type DirectedPingTarget = "primary" | "secondary";
+
 interface MoveMessage {
-  direction: "up" | "down" | "left" | "right";
+  direction: MoveDirection;
   seq?: number;
   targetColor?: "RED" | "GREEN" | "BLUE";
 }
 
 interface PingMessage {
+  x: number;
+  y: number;
+  target?: DirectedPingTarget;
+}
+
+interface DirectedBotTarget {
   x: number;
   y: number;
 }
@@ -83,14 +93,16 @@ export class GameRoom extends Room<GameState> {
   private livekitRoomName: string | null = null;
   private enemyTimer: ReturnType<typeof setInterval> | null = null;
   private readonly ENEMY_MOVE_DELAY = 2000; // 2 seconds
-  private aiTeammateTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly AI_TEAMMATE_MOVE_DELAY = 700;
+  private readonly GRID_SPACING = 2.5;
+  private readonly TRAINING_BOT_TARGET_STEP_BONUS = 18;
+  private trainingBotTargets = new Map<PlayerColor, DirectedBotTarget>();
   private isTrainingMode: boolean = false;
   private humanTrainingColor: PlayerColor = "BLUE";
   private currentTrainingTurn: PlayerColor = "BLUE";
 
   private trainingBotInterval: ReturnType<typeof setInterval> | null = null;
   private trainingBotTimeout: ReturnType<typeof setTimeout> | null = null;
+  private trainingBotHistory: Map<PlayerColor, Array<{ x: number; y: number }>> = new Map();
 
   private readonly TRAINING_BOT_MOVE_DELAY = 500;
   private readonly TRAINING_BOT_TURN_DURATION = 3000;
@@ -335,7 +347,7 @@ export class GameRoom extends Room<GameState> {
 
       if (player.color !== this.currentTrainingTurn) return;
 
-     this.advanceTrainingTurn();
+      this.advanceTrainingTurn();
     });
 
     this.onMessage("changeTrainingColor", (client, message: ChangeTrainingColorMessage) => {
@@ -349,6 +361,11 @@ export class GameRoom extends Room<GameState> {
     this.onMessage("ping", (client, message: PingMessage) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
+
+      if (this.isTrainingMode && message.target) {
+        this.handleTrainingDirectedPing(client, player, message);
+        return;
+      }
 
       // Broadcast to all clients (excluding sender)
       this.broadcast("ping", {
@@ -627,12 +644,10 @@ export class GameRoom extends Room<GameState> {
     if (this.state.players.size === 0 && trainingMode) {
       this.isTrainingMode = true;
       this.isSoloMode = false;
-
-    if (trainingColor === "RED" || trainingColor === "GREEN" || trainingColor === "BLUE") {
-      this.humanTrainingColor = trainingColor;
-      this.currentTrainingTurn = trainingColor;
+      if (trainingColor === "RED" || trainingColor === "GREEN" || trainingColor === "BLUE") {
+        this.humanTrainingColor = trainingColor;
+        this.currentTrainingTurn = trainingColor;
       }
-
       console.log(`Room set to TRAINING mode. Human color: ${this.humanTrainingColor}`);
     }
     if (this.state.players.size === 0 && devMode) {
@@ -880,10 +895,6 @@ export class GameRoom extends Room<GameState> {
       clearInterval(this.enemyTimer);
       this.enemyTimer = null;
     }
-    if (this.aiTeammateTimer) {
-      clearInterval(this.aiTeammateTimer);
-      this.aiTeammateTimer = null;
-    }
     if (this.lobbyTimeout) {
       clearTimeout(this.lobbyTimeout);
       this.lobbyTimeout = null;
@@ -1116,6 +1127,93 @@ export class GameRoom extends Room<GameState> {
     // (removed) Standalone build has no persistence. This previously persisted the
     // session's high score to a platform endpoint. The high score still lives in
     // room state (this.state.highScore) for the duration of the session.
+  }
+
+  private getVisibleBounds() {
+    const center = Math.floor(this.MAX_GRID_SIZE / 2);
+    const halfWidth = Math.floor(this.state.gridWidth / 2);
+    const halfHeight = Math.floor(this.state.gridHeight / 2);
+
+    return {
+      minX: center - halfWidth,
+      maxX: center + halfWidth - 1,
+      minY: center - halfHeight,
+      maxY: center + halfHeight - 1,
+    };
+  }
+
+  private getGridPositionFromWorld(worldX: number, worldY: number): { x: number; y: number } | null {
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
+
+    const { minX, maxX, minY, maxY } = this.getVisibleBounds();
+    const offsetX = (this.state.gridWidth - 1) / 2;
+    const offsetY = (this.state.gridHeight - 1) / 2;
+    const x = Math.round(worldX / this.GRID_SPACING + offsetX) + minX;
+    const y = Math.round(worldY / this.GRID_SPACING + offsetY) + minY;
+
+    if (x < minX || x > maxX || y < minY || y > maxY) return null;
+    return { x, y };
+  }
+
+  private getWorldPositionFromGrid(x: number, y: number): { x: number; y: number } {
+    const { minX, minY } = this.getVisibleBounds();
+    const offsetX = (this.state.gridWidth - 1) / 2;
+    const offsetY = (this.state.gridHeight - 1) / 2;
+
+    return {
+      x: (x - minX - offsetX) * this.GRID_SPACING,
+      y: (y - minY - offsetY) * this.GRID_SPACING,
+    };
+  }
+
+  private getTrainingBotPlayers(): Array<[string, Player]> {
+    return Array.from(this.state.players.entries())
+      .filter(([, player]) => player.color !== this.humanTrainingColor)
+      .sort(([, a], [, b]) => this.playerColors.indexOf(a.color) - this.playerColors.indexOf(b.color));
+  }
+
+  private handleTrainingDirectedPing(client: Client, player: Player, message: PingMessage) {
+    if (!this.state.gameStarted || this.state.isGameOver) return;
+    if (player.color !== this.humanTrainingColor) return;
+    if (message.target !== "primary" && message.target !== "secondary") return;
+
+    const targetPosition = this.getGridPositionFromWorld(message.x, message.y);
+    if (!targetPosition) return;
+
+    const targetIndex = message.target === "secondary" ? 1 : 0;
+    const targetBot = this.getTrainingBotPlayers()[targetIndex];
+    if (!targetBot) return;
+
+    const [, botPlayer] = targetBot;
+    this.trainingBotTargets.set(botPlayer.color, targetPosition);
+
+    const pingPosition = this.getWorldPositionFromGrid(targetPosition.x, targetPosition.y);
+    const pingPayload = {
+      x: pingPosition.x,
+      y: pingPosition.y,
+      color: botPlayer.color,
+    };
+
+    this.broadcast("ping", pingPayload, { except: client });
+    client.send("ping", pingPayload);
+
+    if (this.gameStartTime > 0) {
+      this.logEvent({
+        e: "training_ping",
+        p: this.userIds.get(client.sessionId) || client.sessionId,
+        bot: botPlayer.color,
+        x: targetPosition.x,
+        y: targetPosition.y,
+        by: player.color,
+      });
+    }
+  }
+
+  private clearTrainingBotTargetIfReached(color: PlayerColor, x: number, y: number) {
+    const target = this.trainingBotTargets.get(color);
+    if (target && target.x === x && target.y === y) {
+      this.trainingBotTargets.delete(color);
+    }
   }
 
   private generateInitialCollectibles() {
@@ -1975,6 +2073,8 @@ export class GameRoom extends Room<GameState> {
 
     if (!bot || !bot.isAI) return;
 
+    this.clearTrainingBotTargetIfReached(bot.color, bot.x, bot.y);
+
     const move = this.chooseTrainingBotMove(bot);
     if (!move) return;
 
@@ -1990,7 +2090,12 @@ export class GameRoom extends Room<GameState> {
     }
 
     cell.color = bot.color;
+    const history = this.trainingBotHistory.get(color) ?? [];
+    history.push({ x: move.x, y: move.y });
+    while (history.length > 3) history.shift();
+    this.trainingBotHistory.set(color, history);
     this.calculateScores();
+    this.clearTrainingBotTargetIfReached(bot.color, bot.x, bot.y);
   }
 
   private chooseTrainingBotMove(player: Player): { x: number; y: number } | null {
@@ -2003,27 +2108,116 @@ export class GameRoom extends Room<GameState> {
     const minY = center - halfHeight;
     const maxY = center + halfHeight - 1;
 
-    const adjacent = [
-      { x: player.x, y: player.y - 1 },
-      { x: player.x, y: player.y + 1 },
-      { x: player.x - 1, y: player.y },
-      { x: player.x + 1, y: player.y },
-    ].filter(pos =>
-      pos.x >= minX &&
-      pos.x <= maxX &&
-      pos.y >= minY &&
-      pos.y <= maxY &&
-      !this.isTrainingMoveBlocked(pos.x, pos.y, player.color)
-    );
+    const adjacent = this.getTrainingBotNeighbors(player.x, player.y, minX, maxX, minY, maxY)
+      .filter(pos => !this.isTrainingMoveBlocked(pos.x, pos.y, player.color));
 
     if (adjacent.length === 0) return null;
 
-    const unpainted = adjacent.filter(pos => {
-      return !this.state.gridColors.get(`${pos.x},${pos.y}`);
-    });
+    const scored = adjacent.map((pos) => ({
+      pos,
+      score: this.scoreTrainingBotMove(player, pos.x, pos.y),
+    }));
 
-    const options = unpainted.length > 0 ? unpainted : adjacent;
-    return options[Math.floor(this.enemyRng.next() * options.length)];
+    scored.sort((a, b) => b.score - a.score);
+    const bestScore = scored[0].score;
+    const bestMoves = scored.filter((entry) => entry.score === bestScore);
+    return bestMoves[Math.floor(this.enemyRng.next() * bestMoves.length)].pos;
+  }
+
+  private getTrainingBotNeighbors(
+    x: number,
+    y: number,
+    minX: number,
+    maxX: number,
+    minY: number,
+    maxY: number,
+  ): Array<{ x: number; y: number }> {
+    return [
+      { x, y: y - 1 },
+      { x, y: y + 1 },
+      { x: x - 1, y },
+      { x: x + 1, y },
+    ].filter((pos) => pos.x >= minX && pos.x <= maxX && pos.y >= minY && pos.y <= maxY);
+  }
+
+  private scoreTrainingBotMove(player: Player, x: number, y: number): number {
+    const cell = this.state.gridColors.get(`${x},${y}`);
+    const currentCell = this.state.gridColors.get(`${player.x},${player.y}`);
+    let score = this.enemyRng.next() * 0.25;
+
+    if (!cell?.color) {
+      score += 6;
+    } else if (cell.color === player.color) {
+      score += 2;
+    } else {
+      score -= 5;
+    }
+
+    score += this.countTrainingAdjacentBlankCells(x, y) * 0.8;
+    score -= this.getTrainingNearbyEnemyPenalty(x, y);
+    score += this.getTrainingCollectibleBias(player.color, x, y);
+    score -= this.getTrainingBacktrackPenalty(player.color, x, y);
+
+    const directedTarget = this.trainingBotTargets.get(player.color);
+    if (directedTarget) {
+      const currentDistance = Math.abs(directedTarget.x - player.x) + Math.abs(directedTarget.y - player.y);
+      const nextDistance = Math.abs(directedTarget.x - x) + Math.abs(directedTarget.y - y);
+      const distanceDelta = currentDistance - nextDistance;
+
+      score += distanceDelta * this.TRAINING_BOT_TARGET_STEP_BONUS;
+      score += Math.max(0, 10 - nextDistance) * 1.2;
+      if (nextDistance === 0) score += 30;
+    }
+
+    // Prefer stepping off a dead-end and into space
+    if (!currentCell?.color && cell?.color === player.color) {
+      score -= 1;
+    }
+
+    return score;
+  }
+
+  private countTrainingAdjacentBlankCells(x: number, y: number): number {
+    let count = 0;
+    for (const pos of this.getTrainingBotNeighbors(x, y, -Infinity, Infinity, -Infinity, Infinity)) {
+      if (!this.state.gridColors.get(`${pos.x},${pos.y}`)?.color) count++;
+    }
+    return count;
+  }
+
+  private getTrainingNearbyEnemyPenalty(x: number, y: number): number {
+    let penalty = 0;
+    for (const enemy of this.state.enemies) {
+      const distance = Math.abs(enemy.x - x) + Math.abs(enemy.y - y);
+      if (distance === 1) penalty += 15;
+      else if (distance === 2) penalty += 5;
+      else if (distance === 3) penalty += 2;
+    }
+    return penalty;
+  }
+
+  private getTrainingCollectibleBias(color: PlayerColor, x: number, y: number): number {
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const collectible of this.state.collectibles) {
+      if (collectible.color !== color && collectible.color !== "NEUTRAL") continue;
+      const distance = Math.abs(collectible.x - x) + Math.abs(collectible.y - y);
+      if (distance < nearest) nearest = distance;
+    }
+
+    if (!Number.isFinite(nearest)) return 0;
+    return Math.max(0, 10 - nearest) * 0.7;
+  }
+
+  private getTrainingBacktrackPenalty(color: PlayerColor, x: number, y: number): number {
+    const history = this.trainingBotHistory.get(color) ?? [];
+    let penalty = 0;
+    for (let i = 0; i < history.length; i++) {
+      const prev = history[history.length - 1 - i];
+      if (prev.x === x && prev.y === y) {
+        penalty += 8 - (i * 2);
+      }
+    }
+    return penalty;
   }
 
   private isTrainingMoveBlocked(x: number, y: number, movingColor: PlayerColor): boolean {

@@ -10,6 +10,7 @@ export class Player extends Schema {
   @type("string") name: string = "";
   @type("string") school: string = "";
   @type("string") discordName: string = "";
+  @type("boolean") isAI: boolean = false;
 }
 
 export type CollectibleType = "network" | "box" | "equilibrium" | "clone" | "vantage" | "galaxy" | "polyomino";

@@ -41,7 +41,6 @@ interface PlayerState {
   name: string;
   school: string;
   discordName: string;
-  isAI?: boolean;
 }
 
 interface Collectible {
@@ -244,17 +243,8 @@ const Index = () => {
 
     const newPlayers = new Map<string, PlayerState>();
     gameRoom.state.players?.forEach((p, id) => {
-      newPlayers.set(id, {
-        x: p.x,
-        y: p.y,
-        color: p.color,
-        sessionId: p.sessionId,
-        name: p.name || "",
-        school: p.school || "",
-        discordName: p.discordName || "",
-        isAI: p.isAI || false,
-      });
-      if (id === gameRoom.sessionId && myColor !== p.color) setMyColor(p.color);
+      newPlayers.set(id, { x: p.x, y: p.y, color: p.color, sessionId: p.sessionId, name: p.name || "", school: p.school || "", discordName: p.discordName || "" });
+      if (id === gameRoom.sessionId && !myColor) setMyColor(p.color);
     });
 
     const newGridColors = new Map<string, PlayerColor>();

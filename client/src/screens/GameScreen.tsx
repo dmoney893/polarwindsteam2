@@ -54,6 +54,7 @@ interface PlayerState {
   name: string;
   school: string;
   discordName: string;
+  isAI?: boolean;
 }
 
 interface Collectible {
@@ -602,28 +603,25 @@ export const GameScreen = ({
     100,
   );
 
-  const controlledPlayer = useMemo(() => {
-    const playerArray = Array.from(players.values());
-    if (isTrainingMode && myColor) {
-      return playerArray.find((p) => p.color === myColor) ?? null;
-    }
-    if (isSoloMode) {
-      return playerArray[activePlayerIndex] ?? null;
-    }
-    return myColor ? playerArray.find((p) => p.color === myColor) ?? null : null;
-  }, [players, isTrainingMode, isSoloMode, myColor, activePlayerIndex]);
+  const playerArray = useMemo(() => Array.from(players.values()), [players]);
 
   const scoreBarGradient = useMemo(() => {
-    const c: PlayerColor = controlledPlayer?.color ?? myColor ?? "RED";
+    const c: PlayerColor = isSoloMode
+      ? playerArray[activePlayerIndex]?.color ?? "RED"
+      : myColor ?? "RED";
     return SCORE_BAR_GRADIENT[c];
-  }, [controlledPlayer, myColor]);
+  }, [isSoloMode, myColor, activePlayerIndex, playerArray]);
 
   const localPlayerDisplayName = useMemo(() => {
     if (!room) return null;
-    const me = Array.from(players.values()).find((p) => p.sessionId === room.sessionId);
+    const me = playerArray.find((p) => p.sessionId === room.sessionId);
     const n = me?.name?.trim();
     return n && n.length > 0 ? n : null;
-  }, [room, players]);
+  }, [room, playerArray]);
+
+  const displayedControlledPlayer = isTrainingMode
+    ? playerArray.find((p) => p.color === myColor)
+    : playerArray[activePlayerIndex];
 
   const clearBoardInitiatorName = useMemo(() => {
     if (!clearBoardInitiatorColor) return null;
@@ -949,6 +947,18 @@ export const GameScreen = ({
     }
   }, [activePlayerIndex, isSoloMode, players]);
 
+  const prevTrainingColorRef = useRef(myColor);
+  useEffect(() => {
+    if (!isTrainingMode || !myColor || prevTrainingColorRef.current === myColor) return;
+    prevTrainingColorRef.current = myColor;
+
+    const controlledPlayer = playerArray.find((player) => player.color === myColor);
+    if (!controlledPlayer) return;
+
+    pendingInputsRef.current.clear();
+    setPredictedPos({ x: controlledPlayer.x, y: controlledPlayer.y });
+  }, [isTrainingMode, myColor, playerArray]);
+
   // Keyboard controls
   useEffect(() => {
     if (!room || isSpectator || countdown > 0 || isGameOver) return;
@@ -960,6 +970,25 @@ export const GameScreen = ({
         const now = performance.now();
         if (now - lastRepeatTimeRef.current < REPEAT_INTERVAL) return;
         lastRepeatTimeRef.current = now;
+      }
+      if (isTrainingMode && e.key === "Tab") {
+        e.preventDefault();
+        const colorOrder: PlayerColor[] = ["BLUE", "RED", "GREEN"];
+        const currentIndex = myColor ? colorOrder.indexOf(myColor) : -1;
+        const startIndex = currentIndex >= 0 ? currentIndex : 0;
+        const playerArray = Array.from(players.values());
+
+        for (let offset = 1; offset <= colorOrder.length; offset++) {
+          const nextColor = colorOrder[(startIndex + offset) % colorOrder.length];
+          const nextPlayer = playerArray.find((player) => player.color === nextColor);
+          if (!nextPlayer) continue;
+
+          pendingInputsRef.current.clear();
+          setPredictedPos({ x: nextPlayer.x, y: nextPlayer.y });
+          room.send("changeTrainingColor", { color: nextColor });
+          break;
+        }
+        return;
       }
       if (isSoloMode && !isTrainingMode && e.key === "Tab") {
         e.preventDefault();
@@ -1059,7 +1088,7 @@ export const GameScreen = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [room, controlledPlayer, isSoloMode, activePlayerIndex, players, gridWidth, gridHeight, predictedPos, isDevMode, isSpectator, countdown, isGameOver]);
+  }, [room, myColor, isSoloMode, isTrainingMode, activePlayerIndex, players, gridWidth, gridHeight, predictedPos, isDevMode, isSpectator, countdown, isGameOver]);
 
   // Transform Grid Colors to Node States
   const nodeStates = useMemo(() => {
@@ -1435,16 +1464,73 @@ export const GameScreen = ({
                   <p
                     className="truncate text-xs font-medium tabular-nums leading-tight text-slate-200"
                     style={{
-                      color: Array.from(players.values())[activePlayerIndex]
-                        ? getPlayerUiLabelHex(Array.from(players.values())[activePlayerIndex].color)
+                      color: displayedControlledPlayer
+                        ? getPlayerUiLabelHex(displayedControlledPlayer.color)
                         : undefined,
                     }}
                   >
-                    {Array.from(players.values())[activePlayerIndex]
-                      ? getPlayerDisplayLabel(Array.from(players.values())[activePlayerIndex].color)
+                    {displayedControlledPlayer
+                      ? getPlayerDisplayLabel(displayedControlledPlayer.color)
                       : "…"}
                   </p>
                 </div>
+                {isTrainingMode && (
+                  <div className="grid min-w-0 gap-1">
+                    <p className="font-montreal text-[9px] uppercase leading-none tracking-[0.12em] text-slate-500">
+                      Switch
+                    </p>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(["BLUE", "RED", "GREEN"] as PlayerColor[]).map((color) => {
+                        const isActive = color === myColor;
+                        const player = playerArray.find((p) => p.color === color);
+                        return (
+                          <button
+                            key={color}
+                            type="button"
+                            disabled={isActive || !player}
+                            onClick={() => room?.send("changeTrainingColor", { color })}
+                            className="min-w-0 border border-white/10 bg-white/[0.04] px-1.5 py-1 text-center font-montreal text-[8px] font-semibold uppercase tracking-[0.08em] text-slate-300 transition hover:bg-white/[0.08] disabled:cursor-default disabled:border-white/20 disabled:bg-white/[0.08]"
+                            style={{
+                              color: getPlayerUiLabelHex(color),
+                              opacity: player ? 1 : 0.35,
+                            }}
+                          >
+                            <span className="block truncate">{getPlayerDisplayLabel(color)}</span>
+                            <span className="block truncate text-[7px] text-slate-400">
+                              {isActive ? "You" : player?.isAI ? "AI" : "Take"}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {isTrainingMode && (
+                  <div className="grid min-w-0 gap-2 border-t border-white/10 pt-3">
+                    <div className="flex min-w-0 items-center gap-x-1.5">
+                      <kbd
+                        className="inline-flex shrink-0 items-center rounded-none border border-solid bg-canvas/50 px-1.5 py-0.5 font-montreal text-[9px] font-medium uppercase tracking-[0.1em] text-slate-400"
+                        style={{ borderColor: POLAR_HUD.border }}
+                      >
+                        Tab
+                      </kbd>
+                      <span className="min-w-0 truncate text-[11px] leading-snug text-slate-500">
+                        Change color
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => room?.send("endTrainingTurn")}
+                      className="relative flex min-h-10 w-full items-center justify-center gap-2 rounded-none border border-orange-400/60 bg-orange-950/55 px-3 py-2 text-center font-montreal text-[11px] font-bold uppercase tracking-[0.14em] text-orange-100 transition-colors hover:bg-orange-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-200/35 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+                    >
+                      <Info className="size-3.5 shrink-0" strokeWidth={1.7} aria-hidden />
+                      <span className="truncate">End turn</span>
+                    </button>
+                    <p className="text-[10px] leading-snug text-slate-500">
+                      End your turn when you are ready for AI teammates to continue.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="relative z-10 flex min-h-10 w-full shrink-0 flex-nowrap items-center justify-between gap-x-2 border-t border-white/10 px-3 py-2">
@@ -1533,21 +1619,7 @@ export const GameScreen = ({
         </div>
 
         {/* Controls reference — toggled via info button */}
-        {controlsOpen && (
-          <GameControls
-            showPing={isTrainingMode || !isSoloMode}
-            pingMode={isTrainingMode ? "training" : "multiplayer"}
-          />
-        )}
-        {isTrainingMode && (
-          <button
-            type="button"
-            onClick={() => room?.send("endTrainingTurn")}
-            className="absolute left-4 top-40 z-30 rounded-none border border-orange-400/60 bg-orange-950/60 px-4 py-2 text-xs font-bold uppercase tracking-wider text-orange-200 hover:bg-orange-900/80"
-          >
-            End Turn
-          </button>
-        )}
+        {controlsOpen && <GameControls showPing={!isSoloMode} />}
       </div>
 
       {/* Stage Display - Top Center (polar blue chrome) */}
@@ -2249,8 +2321,12 @@ export const GameScreen = ({
             ))}
 
             {/* Players */}
-            {Array.from(players.values()).map((player, index) => {
-              const isMe = controlledPlayer ? player.sessionId === controlledPlayer.sessionId : false;
+            {playerArray.map((player, index) => {
+              const isMe = isTrainingMode
+                ? player.color === myColor
+                : isSoloMode
+                  ? index === activePlayerIndex
+                  : player.color === myColor;
               // Use predicted position for local player in multiplayer
               const playerX = isMe && predictedPos ? predictedPos.x : player.x;
               const playerY = isMe && predictedPos ? predictedPos.y : player.y;

@@ -603,8 +603,31 @@ export const GameScreen = ({
     100,
   );
 
-  const playerArray = useMemo(() => Array.from(players.values()), [players]);
+  const playerArray = useMemo(
+    () => Array.from(players.values()), 
+    [players]);
 
+  const controlledPlayer = useMemo(() => {
+    if (isTrainingMode) {
+      return playerArray.find((player) => player.color === myColor);
+    }
+
+    if (isSoloMode) {
+      return playerArray[activePlayerIndex];
+    }
+
+    return playerArray.find(
+      (player) => player.sessionId === room?.sessionId
+    );
+  }, [
+    isTrainingMode,
+    isSoloMode,
+    playerArray,
+    myColor,
+    activePlayerIndex,
+    room?.sessionId,
+  ]);
+  
   const scoreBarGradient = useMemo(() => {
     const c: PlayerColor = isSoloMode
       ? playerArray[activePlayerIndex]?.color ?? "RED"

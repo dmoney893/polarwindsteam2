@@ -67,7 +67,7 @@ const MainMenu = () => {
   const handleSolo = () => startGame(true);
   const handleMultiplayer = () => startGame(false);
   const handleTraining = (color: TrainingColor) => {
-    startGame(false, undefined, true, color);
+    startGame(true, undefined, true, color);
   };
 
   const handleJoinRoom = () => {

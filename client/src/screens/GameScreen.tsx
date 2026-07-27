@@ -966,6 +966,8 @@ export const GameScreen = ({
         // Clear pending inputs and reset to new active player's position
         pendingInputsRef.current.clear();
         setPredictedPos({ x: playerArray[activePlayerIndex].x, y: playerArray[activePlayerIndex].y });
+        setPredictedGridColors(new Map());
+        seqCounterRef.current = 0;
       }
     }
   }, [activePlayerIndex, isSoloMode, players]);

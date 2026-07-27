@@ -104,7 +104,7 @@ export class GameRoom extends Room<GameState> {
   private trainingBotTimeout: ReturnType<typeof setTimeout> | null = null;
   private trainingBotHistory: Map<PlayerColor, Array<{ x: number; y: number }>> = new Map();
 
-  private readonly TRAINING_BOT_MOVE_DELAY = 500;
+  private readonly TRAINING_BOT_MOVE_DELAY = 750;
   private readonly TRAINING_BOT_TURN_DURATION = 3000;
   private levelSpec: LevelSpec | null = null;
   private lobbyTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -1059,29 +1059,52 @@ export class GameRoom extends Room<GameState> {
 
   private startGameTimer() {
     this.gameTimer = setInterval(() => {
-      if (this.isDevMode) {
-        this.state.timeRemaining--;
-      } else if (this.state.timeRemaining > 0) {
-        this.state.timeRemaining--;
-      }
+      // Stop processing after the game has ended
+      if (this.state.isGameOver) return;
 
-      // Log score snapshot every 30 seconds for replay
+      // Decrease the timer, but never let it go below zero
+      this.state.timeRemaining = Math.max(
+        0,
+        this.state.timeRemaining - 1
+      );
+
+      // Log score snapshot every 30 seconds
       const elapsed = this.GAME_DURATION - this.state.timeRemaining;
-      if (elapsed > 0 && elapsed % 30 === 0) {
-        const scoreSnapshot: Record<string, unknown> = { e: "score", total: this.state.totalScore };
-        this.state.players.forEach((p, sessionId) => {
-          scoreSnapshot[this.userIds.get(sessionId) || sessionId] = this.state.scores.get(p.color) || 0;
+
+      if (
+        elapsed > 0 &&
+        elapsed % 30 === 0 &&
+        this.state.timeRemaining > 0
+      ) {
+        const scoreSnapshot: Record<string, unknown> = {
+          e: "score",
+          total: this.state.totalScore,
+        };
+
+        this.state.players.forEach((player, sessionId) => {
+          scoreSnapshot[
+            this.userIds.get(sessionId) || sessionId
+          ] = this.state.scores.get(player.color) || 0;
         });
+
         this.logEvent(scoreSnapshot);
       }
 
-      if (this.state.timeRemaining <= 0 && !this.state.isGameOver && !this.isDevMode) {
-        this.endGame();
+      // End in every mode, including dev and training mode
+      if (this.state.timeRemaining === 0) {
+        void this.endGame();
       }
     }, 1000);
   }
 
   private async endGame() {
+    // Prevent endGame from running more than once
+    if (this.state.isGameOver) return;
+
+    // Set this immediately so the client sees the game has ended
+    this.state.isGameOver = true;
+    this.state.timeRemaining = 0;
+
     if (this.gameTimer) {
       clearInterval(this.gameTimer);
       this.gameTimer = null;
@@ -1092,22 +1115,19 @@ export class GameRoom extends Room<GameState> {
       this.enemyTimer = null;
     }
 
-    // Wait for any in-flight milestone fetches (max 3s). Each fetch broadcasts its
-    // own 'milestoneUnlocked' message the moment it resolves, so by the time this
-    // await completes all per-milestone broadcasts have already been sent.
+    // Wait briefly for any pending milestone requests
     await Promise.race([
       Promise.allSettled(this.pendingMilestoneRequests),
       new Promise(resolve => setTimeout(resolve, 3000)),
     ]);
 
-    this.state.isGameOver = true;
-
     console.log("Game ended! Final score:", this.state.highScore);
 
     await this.endPolarWindsSession();
 
-    // Dispose the room after game ends
-    this.disconnect();
+    setTimeout(() => {
+      this.disconnect();
+    }, 1000);
   }
 
   private logEvent(event: Record<string, unknown>) {
@@ -2060,7 +2080,14 @@ export class GameRoom extends Room<GameState> {
   }
 
   private moveTrainingBot(color: PlayerColor) {
-    if (!this.isTrainingMode || this.state.countdown > 0 || this.state.isGameOver) return;
+    if (
+      !this.isTrainingMode ||
+      this.state.countdown > 0 ||
+      this.state.isGameOver
+    ) {
+      return;
+    }
+
     if (color === this.humanTrainingColor) return;
 
     let bot: Player | null = null;
@@ -2078,11 +2105,25 @@ export class GameRoom extends Room<GameState> {
     const move = this.chooseTrainingBotMove(bot);
     if (!move) return;
 
+  // Save everything needed to undo the move.
+    const oldX = bot.x;
+    const oldY = bot.y;
+    const previousTotalScore = this.state.totalScore;
+
+    const cellKey = `${move.x},${move.y}`;
+    const existingCell = this.state.gridColors.get(cellKey);
+    const previousCellColor = existingCell?.color;
+    const cellAlreadyExisted = Boolean(existingCell);
+
+  // Extra protection: never overwrite another player's path.
+    if (previousCellColor && previousCellColor !== bot.color) {
+      return;
+    }
+
     bot.x = move.x;
     bot.y = move.y;
 
-    const cellKey = `${move.x},${move.y}`;
-    let cell = this.state.gridColors.get(cellKey);
+    let cell = existingCell;
 
     if (!cell) {
       cell = new GridCell();
@@ -2090,15 +2131,46 @@ export class GameRoom extends Room<GameState> {
     }
 
     cell.color = bot.color;
+
+  // Check the real result of the move.
+    this.calculateScores();
+
+  // Undo the entire move if it lowered the team's score.
+    if (this.state.totalScore < previousTotalScore) {
+      bot.x = oldX;
+      bot.y = oldY;
+
+      if (cellAlreadyExisted && previousCellColor) {
+        cell.color = previousCellColor;
+      } else {
+        this.state.gridColors.delete(cellKey);
+      }
+
+    // Restore scores and collectible states after undoing the paint.
+      this.calculateScores();
+
+      console.log(
+        `[Training AI] ${color} rejected a harmful move to (${move.x}, ${move.y})`
+      );
+
+      return;
+    }
+
+  // Only record moves that were actually accepted.
     const history = this.trainingBotHistory.get(color) ?? [];
     history.push({ x: move.x, y: move.y });
-    while (history.length > 3) history.shift();
+
+    while (history.length > 3) {
+      history.shift();
+    }
+
     this.trainingBotHistory.set(color, history);
-    this.calculateScores();
     this.clearTrainingBotTargetIfReached(bot.color, bot.x, bot.y);
   }
 
-  private chooseTrainingBotMove(player: Player): { x: number; y: number } | null {
+  private chooseTrainingBotMove(
+    player: Player
+  ): { x: number; y: number } | null {
     const center = Math.floor(this.MAX_GRID_SIZE / 2);
     const halfWidth = Math.floor(this.state.gridWidth / 2);
     const halfHeight = Math.floor(this.state.gridHeight / 2);
@@ -2108,20 +2180,50 @@ export class GameRoom extends Room<GameState> {
     const minY = center - halfHeight;
     const maxY = center + halfHeight - 1;
 
-    const adjacent = this.getTrainingBotNeighbors(player.x, player.y, minX, maxX, minY, maxY)
-      .filter(pos => !this.isTrainingMoveBlocked(pos.x, pos.y, player.color));
+    const adjacent = this.getTrainingBotNeighbors(
+      player.x,
+      player.y,
+      minX,
+      maxX,
+      minY,
+      maxY
+    ).filter((pos) => {
+  // Block other players and enemies
+      if (this.isTrainingMoveBlocked(pos.x, pos.y, player.color)) {
+        return false;
+     }
 
-    if (adjacent.length === 0) return null;
+      const cell = this.state.gridColors.get(`${pos.x},${pos.y}`);
 
-    const scored = adjacent.map((pos) => ({
+  // Treat another player's painted path as a wall.
+      if (cell?.color && cell.color !== player.color) {
+        return false;
+      }
+
+      return true;
+    });
+
+    if (adjacent.length === 0) {
+  // Wait instead of damaging another player's path.
+      return null;
+    }
+
+    const scored = adjacent
+      .map((pos) => ({
       pos,
-      score: this.scoreTrainingBotMove(player, pos.x, pos.y),
-    }));
+        score: this.scoreTrainingBotMove(player, pos.x, pos.y),
+      }))
+      .sort((a, b) => b.score - a.score);
 
-    scored.sort((a, b) => b.score - a.score);
-    const bestScore = scored[0].score;
-    const bestMoves = scored.filter((entry) => entry.score === bestScore);
-    return bestMoves[Math.floor(this.enemyRng.next() * bestMoves.length)].pos;
+  /*
+   * Do not always select the absolute best move.
+   * Randomly choose between the top two options.
+   */
+    const reasonableMoves = scored.slice(0, Math.min(2, scored.length));
+
+    return reasonableMoves[
+      Math.floor(this.enemyRng.next() * reasonableMoves.length)
+    ].pos;
   }
 
   private getTrainingBotNeighbors(

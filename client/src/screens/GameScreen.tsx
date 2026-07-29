@@ -530,7 +530,6 @@ export const GameScreen = ({
   const [controlsOpen, setControlsOpen] = useState(false);
   const [predictedPos, setPredictedPos] = useState<{ x: number, y: number } | null>(null);
   const [predictedGridColors, setPredictedGridColors] = useState<Map<string, PlayerColor | "clear">>(new Map());
-  const [trainingTurnColor, setTrainingTurnColor] = useState<PlayerColor | null>(null);
   const settingsCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const SETTINGS_CLOSE_MS = 300;
 
@@ -646,8 +645,6 @@ export const GameScreen = ({
   const displayedControlledPlayer = isTrainingMode
     ? playerArray.find((p) => p.color === myColor)
     : playerArray[activePlayerIndex];
-
-  const isTrainingHumanTurn = !isTrainingMode || !trainingTurnColor || trainingTurnColor === myColor;
 
   const clearBoardInitiatorName = useMemo(() => {
     if (!clearBoardInitiatorColor) return null;
@@ -814,13 +811,8 @@ export const GameScreen = ({
       // If still pending inputs, keep current predicted position (already calculated)
     };
 
-    const handleTrainingTurnChanged = (message: { currentTurn: PlayerColor; humanColor: PlayerColor }) => {
-      setTrainingTurnColor(message.currentTurn);
-    };
-
     const offPing = room.onMessage("ping", handlePing);
     const offMoveAck = room.onMessage("moveAck", handleMoveAck);
-    const offTrainingTurn = room.onMessage("trainingTurnChanged", handleTrainingTurnChanged);
     const offClearStart = room.onMessage("clearBoardVoteStarted", handleClearBoardVoteStarted);
     const offClearUpdate = room.onMessage("clearBoardVoteUpdate", handleClearBoardVoteUpdate);
     const offClearExpired = room.onMessage("clearBoardVoteExpired", handleClearBoardVoteExpired);
@@ -834,7 +826,6 @@ export const GameScreen = ({
       [
         offPing,
         offMoveAck,
-        offTrainingTurn,
         offClearStart,
         offClearUpdate,
         offClearExpired,
@@ -993,16 +984,6 @@ export const GameScreen = ({
     setPredictedPos({ x: controlledPlayer.x, y: controlledPlayer.y });
   }, [isTrainingMode, myColor, playerArray]);
 
-  const prevTrainingHumanTurnRef = useRef(isTrainingHumanTurn);
-  useEffect(() => {
-    const wasHumanTurn = prevTrainingHumanTurnRef.current;
-    prevTrainingHumanTurnRef.current = isTrainingHumanTurn;
-
-    if (!isTrainingMode || !isTrainingHumanTurn || wasHumanTurn || !controlledPlayer) return;
-    pendingInputsRef.current.clear();
-    setPredictedPos({ x: controlledPlayer.x, y: controlledPlayer.y });
-  }, [isTrainingMode, isTrainingHumanTurn, controlledPlayer]);
-
   // Keyboard controls
   useEffect(() => {
     if (!room || isSpectator || countdown > 0 || isGameOver) return;
@@ -1072,14 +1053,6 @@ export const GameScreen = ({
       if (direction) {
         e.preventDefault();
 
-        if (!isTrainingHumanTurn) {
-          if (controlledPlayer) {
-            pendingInputsRef.current.clear();
-            setPredictedPos({ x: controlledPlayer.x, y: controlledPlayer.y });
-          }
-          return;
-        }
-
         const playerArray = Array.from(players.values());
         const currentPlayer = controlledPlayer;
         const activeColor = currentPlayer?.color;
@@ -1140,7 +1113,7 @@ export const GameScreen = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [room, myColor, isSoloMode, isTrainingMode, isTrainingHumanTurn, controlledPlayer, activePlayerIndex, players, gridWidth, gridHeight, predictedPos, isDevMode, isSpectator, countdown, isGameOver]);
+  }, [room, myColor, isSoloMode, isTrainingMode, activePlayerIndex, players, gridWidth, gridHeight, predictedPos, isDevMode, isSpectator, countdown, isGameOver]);
 
   // Transform Grid Colors to Node States
   const nodeStates = useMemo(() => {

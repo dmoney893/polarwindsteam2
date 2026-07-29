@@ -271,9 +271,6 @@ export class GameRoom extends Room<GameState> {
       if (!player || !playerKey) return;
 
       if (this.isTrainingMode && player.color !== this.currentTrainingTurn) {
-        if (message.seq !== undefined) {
-          client.send("moveAck", { seq: message.seq, x: player.x, y: player.y });
-        }
         return;
       }
 
@@ -2105,60 +2102,75 @@ export class GameRoom extends Room<GameState> {
 
     this.clearTrainingBotTargetIfReached(bot.color, bot.x, bot.y);
 
-    const moves = this.chooseTrainingBotMoves(bot);
-    if (moves.length === 0) return;
+    const move = this.chooseTrainingBotMove(bot);
+    if (!move) return;
 
+  // Save everything needed to undo the move.
+    const oldX = bot.x;
+    const oldY = bot.y;
     const previousTotalScore = this.state.totalScore;
 
-    for (const move of moves) {
-      const oldX = bot.x;
-      const oldY = bot.y;
-      const cellKey = `${move.x},${move.y}`;
-      const existingCell = this.state.gridColors.get(cellKey);
-      const previousCellColor = existingCell?.color;
-      const cellAlreadyExisted = Boolean(existingCell);
+    const cellKey = `${move.x},${move.y}`;
+    const existingCell = this.state.gridColors.get(cellKey);
+    const previousCellColor = existingCell?.color;
+    const cellAlreadyExisted = Boolean(existingCell);
 
-      if (previousCellColor && previousCellColor !== bot.color) {
-        continue;
-      }
-
-      bot.x = move.x;
-      bot.y = move.y;
-
-      let cell = existingCell;
-      if (!cell) {
-        cell = new GridCell();
-        this.state.gridColors.set(cellKey, cell);
-      }
-
-      cell.color = bot.color;
-      this.calculateScores();
-
-      if (this.state.totalScore < previousTotalScore) {
-        bot.x = oldX;
-        bot.y = oldY;
-
-        if (cellAlreadyExisted && previousCellColor) {
-          cell.color = previousCellColor;
-        } else {
-          this.state.gridColors.delete(cellKey);
-        }
-
-        this.calculateScores();
-        console.log(`[Training AI] ${color} rejected a harmful move to (${move.x}, ${move.y})`);
-        continue;
-      }
-
-      this.rememberTrainingBotPosition(color, oldX, oldY);
-      this.rememberTrainingBotPosition(color, move.x, move.y);
-      this.clearTrainingBotTargetIfReached(bot.color, bot.x, bot.y);
+  // Extra protection: never overwrite another player's path.
+    if (previousCellColor && previousCellColor !== bot.color) {
       return;
     }
+
+    bot.x = move.x;
+    bot.y = move.y;
+
+    let cell = existingCell;
+
+    if (!cell) {
+      cell = new GridCell();
+      this.state.gridColors.set(cellKey, cell);
+    }
+
+    cell.color = bot.color;
+
+  // Check the real result of the move.
+    this.calculateScores();
+
+  // Undo the entire move if it lowered the team's score.
+    if (this.state.totalScore < previousTotalScore) {
+      bot.x = oldX;
+      bot.y = oldY;
+
+      if (cellAlreadyExisted && previousCellColor) {
+        cell.color = previousCellColor;
+      } else {
+        this.state.gridColors.delete(cellKey);
+      }
+
+    // Restore scores and collectible states after undoing the paint.
+      this.calculateScores();
+
+      console.log(
+        `[Training AI] ${color} rejected a harmful move to (${move.x}, ${move.y})`
+      );
+
+      return;
+    }
+
+  // Only record moves that were actually accepted.
+    const history = this.trainingBotHistory.get(color) ?? [];
+    history.push({ x: move.x, y: move.y });
+
+    while (history.length > 3) {
+      history.shift();
+    }
+
+    this.trainingBotHistory.set(color, history);
+    this.clearTrainingBotTargetIfReached(bot.color, bot.x, bot.y);
   }
 
-  private chooseTrainingBotMoves(
+  private chooseTrainingBotMove(
     player: Player
-  ): Array<{ x: number; y: number }> {
+  ): { x: number; y: number } | null {
     const center = Math.floor(this.MAX_GRID_SIZE / 2);
     const halfWidth = Math.floor(this.state.gridWidth / 2);
     const halfHeight = Math.floor(this.state.gridHeight / 2);
@@ -2191,28 +2203,27 @@ export class GameRoom extends Room<GameState> {
       return true;
     });
 
-    if (adjacent.length === 0) return [];
+    if (adjacent.length === 0) {
+  // Wait instead of damaging another player's path.
+      return null;
+    }
 
     const scored = adjacent
       .map((pos) => ({
-        pos,
+      pos,
         score: this.scoreTrainingBotMove(player, pos.x, pos.y),
       }))
       .sort((a, b) => b.score - a.score);
 
-    const bestScore = scored[0].score;
-    const reasonableMoves = scored
-      .filter((move) => move.score >= bestScore - 2.5)
-      .slice(0, 3);
+  /*
+   * Do not always select the absolute best move.
+   * Randomly choose between the top two options.
+   */
+    const reasonableMoves = scored.slice(0, Math.min(2, scored.length));
 
-    if (reasonableMoves.length > 1) {
-      const selectedIndex = Math.floor(this.enemyRng.next() * reasonableMoves.length);
-      const [selected] = reasonableMoves.splice(selectedIndex, 1);
-      reasonableMoves.unshift(selected);
-    }
-
-    const remainingMoves = scored.filter((move) => !reasonableMoves.includes(move));
-    return [...reasonableMoves, ...remainingMoves].map((move) => move.pos);
+    return reasonableMoves[
+      Math.floor(this.enemyRng.next() * reasonableMoves.length)
+    ].pos;
   }
 
   private getTrainingBotNeighbors(
@@ -2247,9 +2258,7 @@ export class GameRoom extends Room<GameState> {
     score += this.countTrainingAdjacentBlankCells(x, y) * 0.8;
     score -= this.getTrainingNearbyEnemyPenalty(x, y);
     score += this.getTrainingCollectibleBias(player.color, x, y);
-    score += this.getTrainingCollectibleProgress(player, x, y);
     score -= this.getTrainingBacktrackPenalty(player.color, x, y);
-    score += this.getTrainingMomentumBonus(player.color, player.x, player.y, x, y);
 
     const directedTarget = this.trainingBotTargets.get(player.color);
     if (directedTarget) {
@@ -2258,7 +2267,7 @@ export class GameRoom extends Room<GameState> {
       const distanceDelta = currentDistance - nextDistance;
 
       score += distanceDelta * this.TRAINING_BOT_TARGET_STEP_BONUS;
-      score += Math.max(0, 10 - nextDistance) * 1.6;
+      score += Math.max(0, 10 - nextDistance) * 1.2;
       if (nextDistance === 0) score += 30;
     }
 
@@ -2271,9 +2280,8 @@ export class GameRoom extends Room<GameState> {
   }
 
   private countTrainingAdjacentBlankCells(x: number, y: number): number {
-    const { minX, maxX, minY, maxY } = this.getVisibleBounds();
     let count = 0;
-    for (const pos of this.getTrainingBotNeighbors(x, y, minX, maxX, minY, maxY)) {
+    for (const pos of this.getTrainingBotNeighbors(x, y, -Infinity, Infinity, -Infinity, Infinity)) {
       if (!this.state.gridColors.get(`${pos.x},${pos.y}`)?.color) count++;
     }
     return count;
@@ -2302,24 +2310,6 @@ export class GameRoom extends Room<GameState> {
     return Math.max(0, 10 - nearest) * 0.7;
   }
 
-  private getTrainingCollectibleProgress(player: Player, x: number, y: number): number {
-    const currentDistance = this.getNearestTrainingCollectibleDistance(player.color, player.x, player.y);
-    const nextDistance = this.getNearestTrainingCollectibleDistance(player.color, x, y);
-    if (!Number.isFinite(currentDistance) || !Number.isFinite(nextDistance)) return 0;
-    if (currentDistance > 10 && nextDistance > 10) return 0;
-    return (currentDistance - nextDistance) * 2.2;
-  }
-
-  private getNearestTrainingCollectibleDistance(color: PlayerColor, x: number, y: number): number {
-    let nearest = Number.POSITIVE_INFINITY;
-    for (const collectible of this.state.collectibles) {
-      if (collectible.color !== color && collectible.color !== "NEUTRAL") continue;
-      const distance = Math.abs(collectible.x - x) + Math.abs(collectible.y - y);
-      if (distance < nearest) nearest = distance;
-    }
-    return nearest;
-  }
-
   private getTrainingBacktrackPenalty(color: PlayerColor, x: number, y: number): number {
     const history = this.trainingBotHistory.get(color) ?? [];
     let penalty = 0;
@@ -2330,36 +2320,6 @@ export class GameRoom extends Room<GameState> {
       }
     }
     return penalty;
-  }
-
-  private getTrainingMomentumBonus(color: PlayerColor, fromX: number, fromY: number, toX: number, toY: number): number {
-    const history = this.trainingBotHistory.get(color) ?? [];
-    if (history.length < 2) return 0;
-
-    const previous = history[history.length - 2];
-    const last = history[history.length - 1];
-    const lastDx = last.x - previous.x;
-    const lastDy = last.y - previous.y;
-    const nextDx = toX - fromX;
-    const nextDy = toY - fromY;
-
-    if (lastDx === nextDx && lastDy === nextDy) return 1.25;
-    if (lastDx === -nextDx && lastDy === -nextDy) return -3.5;
-    return 0;
-  }
-
-  private rememberTrainingBotPosition(color: PlayerColor, x: number, y: number) {
-    const history = this.trainingBotHistory.get(color) ?? [];
-    const last = history[history.length - 1];
-    if (!last || last.x !== x || last.y !== y) {
-      history.push({ x, y });
-    }
-
-    while (history.length > 5) {
-      history.shift();
-    }
-
-    this.trainingBotHistory.set(color, history);
   }
 
   private isTrainingMoveBlocked(x: number, y: number, movingColor: PlayerColor): boolean {
